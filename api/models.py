@@ -607,7 +607,7 @@ class CreateTenantClusterPoolsRequest(BaseModel):
     min_available_sandbox_placements: int = Field(0, ge=0)
     max_placements: int = Field(15, ge=1)
     environment_level: str = "integration"
-    cloud: str = "osp"
+    cloud: str = "cnv-dedicated-shared"
     apply_to_cluster: bool = False
 
 

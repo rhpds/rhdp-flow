@@ -2912,7 +2912,14 @@ def create_tenant_cluster_pools(
         ci_tail = parts[1] if len(parts) > 1 else cluster_ci
         lab = re.sub(r"-cluster\.[^.]+$", "", ci_tail)
 
-        purpose = "prod" if body.environment_level == "production" else "dev"
+        # Derive purpose from CI stage suffix (.event → events, .prod → prod, else dev)
+        ci_suffix = cluster_ci.rsplit(".", 1)[-1] if "." in cluster_ci else ""
+        if ci_suffix == "event":
+            purpose = "events"
+        elif ci_suffix == "prod":
+            purpose = "prod"
+        else:
+            purpose = "dev"
 
         pool = {
             "apiVersion": "babylon.gpte.redhat.com/v1",
