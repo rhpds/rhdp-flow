@@ -243,7 +243,7 @@ export const UploadTab: React.FC<Props> = ({
   const [poolCreateMinAvailPlacements, setPoolCreateMinAvailPlacements] = useState(0);
   const [poolCreateMaxPlacements, setPoolCreateMaxPlacements] = useState(15);
   const [poolCreateEnvLevel, setPoolCreateEnvLevel] = useState('integration');
-  const [poolCreateCloud, setPoolCreateCloud] = useState('osp');
+  const [poolCreateCloud, setPoolCreateCloud] = useState('cnv-dedicated-shared');
   const [poolCreateYaml, setPoolCreateYaml] = useState('');
   const [poolCreateResults, setPoolCreateResults] = useState<Array<{ name: string; success: boolean; action: string; output: string; error: string }>>([]);
   const [poolCreateLoading, setPoolCreateLoading] = useState(false);
@@ -2778,9 +2778,9 @@ export const UploadTab: React.FC<Props> = ({
                 onChange={e => setPoolCreateCloud(e.target.value)}
                 style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid var(--pf-v6-global--BorderColor--100)', background: 'var(--pf-v6-global--BackgroundColor--100)', color: 'var(--pf-v6-global--Color--100)' }}
               >
-                <option value="osp">osp (OpenStack)</option>
+                <option value="cnv-dedicated-shared">cnv-dedicated-shared (default)</option>
                 <option value="aws">aws</option>
-                <option value="cnv-dedicated-shared">cnv-dedicated-shared</option>
+                <option value="osp">osp (OpenStack)</option>
                 <option value="azure">azure</option>
                 <option value="gcp">gcp</option>
               </select>
