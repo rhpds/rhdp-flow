@@ -2733,9 +2733,14 @@ def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(verify_
     handler, log_path = start_log_capture("qa")
     temp_csv_paths: list[str] = []
     try:
-        all_qa1: list[dict] = []
-        all_qa2: list[dict] = []
-        all_qa3: list[dict] = []
+        # Operator-facing order: catalog → setup → deploy+Soundcheck.
+        # Internal helpers keep historical names (qa1=setup, qa2=deploy, qa3=catalog).
+        all_setup: list[dict] = []
+        all_deploy: list[dict] = []
+        all_catalog: list[dict] = []
+        run_catalog = body.type.value in ("1", "all")
+        run_setup = body.type.value in ("2", "both", "all")
+        run_deploy = body.type.value in ("3", "both", "all")
 
         for ns in namespaces:
             # Always write a fresh temp CSV from in-memory schedules so that
@@ -2743,26 +2748,26 @@ def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(verify_
             temp_path = _write_qa_csv_for_namespace(ns)
             temp_csv_paths.append(temp_path)
 
-            if body.type.value in ("1", "both", "all"):
-                all_qa1.extend(qa1_verify_setup(temp_path, ns, config))
-            if body.type.value in ("2", "both", "all"):
-                all_qa2.extend(qa2_verify_deployment_status(temp_path, ns, config))
+            if run_setup:
+                all_setup.extend(qa1_verify_setup(temp_path, ns, config))
+            if run_deploy:
+                all_deploy.extend(qa2_verify_deployment_status(temp_path, ns, config))
 
-        # QA3 runs once on full CSV (not namespace-specific)
-        if body.type.value in ("3", "all") and temp_csv_paths:
-            all_qa3.extend(qa3_verify_catalog_items_exist(temp_csv_paths[0], config))
+        # Catalog runs once on full CSV (not namespace-specific)
+        if run_catalog and temp_csv_paths:
+            all_catalog.extend(qa3_verify_catalog_items_exist(temp_csv_paths[0], config))
 
         if body.type.value == "1":
-            all_raw = _dedup_qa_results(all_qa1)
+            all_raw = all_catalog
         elif body.type.value == "2":
-            all_raw = all_qa2
+            all_raw = _dedup_qa_results(all_setup)
         elif body.type.value == "3":
-            all_raw = all_qa3
+            all_raw = all_deploy
         elif body.type.value == "both":
-            all_raw = _merge_qa1_qa2(all_qa1, all_qa2)
-        else:  # "all"
-            merged = _merge_qa1_qa2(all_qa1, all_qa2)
-            all_raw = merged + all_qa3
+            all_raw = _merge_qa1_qa2(all_setup, all_deploy)
+        else:  # "all" — catalog rows first, then merged setup+deploy
+            merged = _merge_qa1_qa2(all_setup, all_deploy)
+            all_raw = all_catalog + merged
 
         all_raw = [_normalize_qa_result_dict(r) for r in all_raw]
         all_results = [QAResultItem(**r) for r in all_raw]

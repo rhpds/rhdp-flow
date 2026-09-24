@@ -216,11 +216,12 @@ class DeleteResultsRequest(BaseModel):
 
 
 class QAType(str, Enum):
-    qa1 = "1"
-    qa2 = "2"
-    qa3 = "3"
-    both = "both"  # For backward compatibility (runs 1+2 only)
-    all = "all"    # Runs all QA checks (1+2+3)
+    """Operator-facing QA order: catalog → setup → deploy+Soundcheck."""
+    qa1 = "1"      # Verify catalog items exist
+    qa2 = "2"      # Verify setup (schedule vs cluster)
+    qa3 = "3"      # Verify deployment + Soundcheck
+    both = "both"  # Setup + deployment (2+3)
+    all = "all"    # Catalog + setup + deployment (1+2+3)
 
 
 class QARequest(BaseModel):
@@ -305,7 +306,7 @@ class HealthResponse(BaseModel):
     admin_ops_url: str = ""
     # Path inside Labagator for the embedded Babylon Admin Ops pane
     labagator_babylon_path: str = "/babylon"
-    # Showroom Soundcheck base URL (QA2 enrich + Admin Ops)
+    # Showroom Soundcheck base URL (QA3 enrich + Admin Ops)
     soundcheck_url: str = ""
 
 

@@ -796,7 +796,7 @@ def test_qa_run_with_namespace_override_filters_csv(mock_qa1, client):
         }]
 
     mock_qa1.side_effect = fake_qa
-    resp = client.post("/api/qa/run", json={"type": "1", "namespace": "qa-ns-b"})
+    resp = client.post("/api/qa/run", json={"type": "2", "namespace": "qa-ns-b"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 1
@@ -807,7 +807,7 @@ def test_qa_run_with_namespace_override_filters_csv(mock_qa1, client):
 @patch("api.routes.qa2_verify_deployment_status")
 @patch("api.routes.qa1_verify_setup")
 def test_qa_run_both_merges_one_row_per_workshop(mock_qa1, mock_qa2, client):
-    """Running both QA types must not duplicate rows; QA2 row wins for the same workshop."""
+    """Running both QA types must not duplicate rows; deploy (QA3) row wins for the same workshop."""
     csv_single = """CI Name,CI,Namespace,Users,Enable_workshop_interface,Password,Activity,Purpose,Workshop Name,Provisioning Date (UTC),Auto-stop (UTC),Auto-destroy (UTC)
 W1,vendor.w.prod,ns1,10,True,pw,Adm,QA,W1,01/01/2026 09:00,01/01/2026 17:00,02/01/2026 09:00
 """
@@ -881,7 +881,7 @@ def test_qa_status_emoji_stripped(mock_qa1, uploaded_client):
         "landing_page_url": "",
         "healthy": True,
     }]
-    resp = uploaded_client.post("/api/qa/run", json={"type": "1"})
+    resp = uploaded_client.post("/api/qa/run", json={"type": "2"})
     assert resp.status_code == 200
     assert resp.json()["results"][0]["status"] == "VERIFIED"
 

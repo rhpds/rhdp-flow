@@ -404,7 +404,7 @@ export const QATab: React.FC<Props> = ({
   return (
     <PageSection>
       <Alert variant="info" isInline isPlain title="Keep it simple" style={{ marginBottom: 16 }}>
-        <strong>QA</strong> = verify the plan matches reality (QA1 setup · QA2 health · QA3 catalog CIs).
+        <strong>QA</strong> = verify the plan matches reality (QA1 catalog · QA2 setup · QA3 deploy + Soundcheck).
         {' '}
         <strong>Admin Ops</strong> = live workshops + ad-hoc lock/extend/scale (can diverge from Labagator).
         {' '}
@@ -468,10 +468,10 @@ export const QATab: React.FC<Props> = ({
                 className="qa-type-select"
                 style={{ width: 240 }}
               >
-                <FormSelectOption value="1" label="QA1 - Verify Setup" />
-                <FormSelectOption value="2" label="QA2 - Verify Deployment" />
-                <FormSelectOption value="3" label="QA3 - Verify Catalog Items" />
-                <FormSelectOption value="both" label="Both (QA1 + QA2)" />
+                <FormSelectOption value="1" label="QA1 - Verify Catalog Items" />
+                <FormSelectOption value="2" label="QA2 - Verify Setup" />
+                <FormSelectOption value="3" label="QA3 - Verify Deployment" />
+                <FormSelectOption value="both" label="Both (QA2 + QA3)" />
                 <FormSelectOption value="all" label="All (QA1 + QA2 + QA3)" />
               </FormSelect>
             </SplitItem>
@@ -521,19 +521,19 @@ export const QATab: React.FC<Props> = ({
               <>Load schedules on Upload &amp; Deploy first, then run QA against your namespace.</>
             )}
             {!noSchedules && qaType === '1' && (
-              <>Compares live workshops to your schedule — dates, seats, and config.</>
+              <>Catalog CIs in the CSV exist on the cluster (typo catch — run first).</>
             )}
             {!noSchedules && qaType === '2' && (
-              <>Health, seats, URLs. Showroom column = full batched Soundcheck from QA2 (status + deep-link).</>
+              <>Compares live workshops to your schedule — dates, seats, and config.</>
             )}
             {!noSchedules && qaType === '3' && (
-              <>Catalog CIs in the CSV exist on the cluster (typo catch).</>
+              <>Health, seats, URLs. Showroom column = full batched Soundcheck (status + deep-link).</>
             )}
             {!noSchedules && qaType === 'both' && (
               <>Setup verification + deployment checks (one row per workshop).</>
             )}
             {!noSchedules && qaType === 'all' && (
-              <>Full suite: setup, deployment status, and catalog validation.</>
+              <>Full suite: catalog → setup → deployment + Soundcheck.</>
             )}
             {!noSchedules && (
               <>
@@ -751,7 +751,22 @@ export const QATab: React.FC<Props> = ({
       {qaResults.length === 0 && (
         <div className="ops-grid" style={{ marginBottom: 16 }}>
           <Card isCompact>
-            <CardTitle>QA1 — Verify Setup</CardTitle>
+            <CardTitle>QA1 — Verify Catalog Items</CardTitle>
+            <CardBody style={{ fontSize: '0.85rem' }}>
+              <p>
+                <strong>When:</strong> Before deploy — CSV hygiene (fastest).
+              </p>
+              <p>
+                <strong>What it checks:</strong>
+              </p>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+                <li>Every CI in the schedule exists in babylon-catalog-*</li>
+                <li>Catches typos / wrong suffixes before provision fails</li>
+              </ul>
+            </CardBody>
+          </Card>
+          <Card isCompact>
+            <CardTitle>QA2 — Verify Setup</CardTitle>
             <CardBody style={{ fontSize: '0.85rem' }}>
               <p>
                 <strong>When:</strong> Immediately after deploying workshops.
@@ -767,7 +782,7 @@ export const QATab: React.FC<Props> = ({
             </CardBody>
           </Card>
           <Card isCompact>
-            <CardTitle>QA2 — Verify Deployment</CardTitle>
+            <CardTitle>QA3 — Verify Deployment</CardTitle>
             <CardBody style={{ fontSize: '0.85rem' }}>
               <p>
                 <strong>When:</strong> 10–30 minutes after deploy.
@@ -778,26 +793,8 @@ export const QATab: React.FC<Props> = ({
               <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
                 <li>Health and provisioned seat counts</li>
                 <li>Student landing page URLs (Students tab)</li>
-                <li>Showroom column: full Soundcheck run from QA2 (status + deep-link)</li>
+                <li>Showroom column: full Soundcheck batch (status + deep-link)</li>
               </ul>
-            </CardBody>
-          </Card>
-          <Card isCompact>
-            <CardTitle>QA3 — Verify Catalog Items</CardTitle>
-            <CardBody style={{ fontSize: '0.85rem' }}>
-              <p>
-                <strong>When:</strong> Before or after deploy — CSV hygiene.
-              </p>
-              <p>
-                <strong>What it checks:</strong>
-              </p>
-              <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
-                <li>Every CI in the schedule exists in babylon-catalog-*</li>
-                <li>Catches typos / wrong suffixes before provision fails</li>
-              </ul>
-              <p style={{ marginTop: 8, marginBottom: 0, color: 'var(--pf-t--global--text--color--subtle)' }}>
-                Select <strong>QA3</strong> or <strong>All</strong> in the QA type dropdown above.
-              </p>
             </CardBody>
           </Card>
         </div>

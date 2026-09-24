@@ -88,7 +88,7 @@ const App: React.FC = () => {
     if (!initialHash.fromOps) return;
     window.history.replaceState(null, '', '#qa');
     showToast(
-      'Ad-hoc ops (lock/extend/scale) → Babylon Admin Ops. QA verifies only. QA3 = catalog item check (in QA type dropdown).',
+      'Ad-hoc ops (lock/extend/scale) → Babylon Admin Ops. QA verifies only. Order: QA1 catalog → QA2 setup → QA3 deploy+Soundcheck.',
       'info',
     );
   }, [initialHash.fromOps, showToast]);

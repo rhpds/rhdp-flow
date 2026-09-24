@@ -4338,7 +4338,7 @@ def qa1_verify_setup(
         List of verification results comparing CSV schedule vs actual deployments
     """
     logger.info("=" * 70)
-    logger.info("QA1: Verify Setup - Comparing CSV Schedule vs Actual Deployments")
+    logger.info("QA2: Verify Setup - Comparing CSV Schedule vs Actual Deployments")
     logger.info("=" * 70)
     
     # Read scheduled items from CSV
@@ -4710,7 +4710,7 @@ def qa1_verify_setup(
     matches = sum(1 for r in results if r.get('matches_schedule') == 'Yes')
     
     logger.info("=" * 70)
-    logger.info("QA1 Summary: Setup Verification")
+    logger.info("QA2 Summary: Setup Verification")
     logger.info(f"  Total Scheduled (CSV): {total_scheduled}")
     logger.info(f"  Total Deployed: {total_deployed}")
     logger.info(f"  ✅ Verified (healthy & ready): {verified}")
@@ -4738,7 +4738,7 @@ def qa2_verify_deployment_status(
         List of verification results with deployment status and seat counts
     """
     logger.info("=" * 70)
-    logger.info("QA2: Verify Deployment Status - Check if deployed and seat counts")
+    logger.info("QA3: Verify Deployment Status - Check if deployed and seat counts")
     logger.info("=" * 70)
     
     # Read scheduled items from CSV
@@ -5071,7 +5071,7 @@ def qa2_verify_deployment_status(
     seats_match = sum(1 for r in results if r.get('seats_match') == 'Yes')
     
     logger.info("=" * 70)
-    logger.info("QA2 Summary: Deployment Status")
+    logger.info("QA3 Summary: Deployment Status")
     logger.info(f"  Total Scheduled (CSV): {total_scheduled}")
     logger.info(f"  Total Deployed: {total_deployed}")
     logger.info(f"  ✅ Provisioned: {provisioned}")
@@ -5093,7 +5093,7 @@ def _enrich_qa2_results_with_soundcheck(
     namespace: str,
     config: "RHDPConfig",
 ) -> None:
-    """Run a full batched Soundcheck for QA2 workshops, then map status onto rows.
+    """Run a full batched Soundcheck for QA3 workshops, then map status onto rows.
 
     Flow QA owns deep showroom checks so operators are not forced into Admin Ops
     for a pass/fail. Admin Ops still keeps its own full Run Soundcheck button for
@@ -5129,7 +5129,7 @@ def _enrich_qa2_results_with_soundcheck(
         kick = _http_json(
             "GET",
             f"{base}/api/check?workshop={urllib.parse.quote(','.join(all_ids))}"
-            f"&name={urllib.parse.quote(f'Flow QA2 Soundcheck — {len(all_ids)} workshop(s)')}",
+            f"&name={urllib.parse.quote(f'Flow QA3 Soundcheck — {len(all_ids)} workshop(s)')}",
             timeout=60.0,
         )
         session_id = str(kick.get("session_id") or "")
@@ -5142,13 +5142,13 @@ def _enrich_qa2_results_with_soundcheck(
                     break
                 time.sleep(5.0)
             logger.info(
-                "QA2 Soundcheck session %s ended/poll-stop with status=%s",
+                "QA3 Soundcheck session %s ended/poll-stop with status=%s",
                 session_id,
                 session_status,
             )
     except Exception as exc:
         logger.warning(
-            "QA2 Soundcheck kickoff/poll failed (%s) — falling back to check-status / deep-link",
+            "QA3 Soundcheck kickoff/poll failed (%s) — falling back to check-status / deep-link",
             exc,
         )
 
@@ -5162,7 +5162,7 @@ def _enrich_qa2_results_with_soundcheck(
         )
         statuses = body.get("statuses") or {}
     except Exception as exc:
-        logger.warning("QA2 Soundcheck check-status failed: %s", exc)
+        logger.warning("QA3 Soundcheck check-status failed: %s", exc)
         for r in results:
             r.setdefault("showroom_status", session_status if session_id else "")
             r.setdefault("showroom_url", session_url if session_id else "")
@@ -5222,7 +5222,7 @@ def _enrich_qa2_results_with_soundcheck(
 
 
 def _enrich_qa_result_with_showroom(result: dict, schedule, config) -> None:
-    """Deprecated path — QA2 uses Soundcheck batch enrich instead of oc probes."""
+    """Deprecated path — QA3 uses Soundcheck batch enrich instead of oc probes."""
     result.setdefault("showroom_status", "")
     result.setdefault("showroom_url", "")
 
@@ -5256,7 +5256,7 @@ def qa3_verify_catalog_items_exist(
         }
     """
     logger.info("=" * 70)
-    logger.info("QA3: Verify Catalog Items Exist")
+    logger.info("QA1: Verify Catalog Items Exist")
     logger.info("=" * 70)
 
     schedules = read_csv_input(csv_file)
@@ -5327,7 +5327,7 @@ def qa3_verify_catalog_items_exist(
 
     # Summary
     logger.info("=" * 70)
-    logger.info("QA3 Summary: Catalog Item Validation")
+    logger.info("QA1 Summary: Catalog Item Validation")
     logger.info(f"  Total Catalog Items: {total}")
     logger.info(f"  ✅ Found: {found_count}")
     logger.info(f"  ❌ Not Found: {not_found_count}")
@@ -7436,8 +7436,8 @@ Examples:
     )
     parser.add_argument(
         "--qa",
-        choices=["1", "2", "both"],
-        help="Run QA verification: '1'=verify setup (times/users), '2'=verify deployment status (seats), 'both'=run both"
+        choices=["1", "2", "3", "both"],
+        help="Run QA: '1'=catalog items, '2'=setup (times/users), '3'=deployment+Soundcheck, 'both'=setup+deployment"
     )
     parser.add_argument(
         "--lock",
@@ -7568,44 +7568,54 @@ def main():
             logger.info(f"Checking namespace(s): {', '.join(namespaces)}")
             logger.info("=" * 70)
             
-            results1_all: list[dict] = []
-            results2_all: list[dict] = []
-            
+            results_setup: list[dict] = []
+            results_deploy: list[dict] = []
+            results_catalog: list[dict] = []
+
+            # Catalog once on full CSV (not namespace-specific)
+            if args.qa == "1":
+                logger.info("")
+                results_catalog = qa3_verify_catalog_items_exist(args.input_csv, config)
+                qa_export_results(results_catalog, "qa1_catalog.csv")
+                logger.info("QA1 catalog results exported to: qa1_catalog.csv")
+
             for namespace in namespaces:
-                # Run QA1: Verify Setup
-                if args.qa in ["1", "both"]:
-                    logger.info("")
-                    r1 = qa1_verify_setup(args.input_csv, namespace, config)
-                    results1_all.extend(r1)
-                    
-                    qa1_output_file = f"qa1_setup_{namespace}.csv"
-                    qa_export_results(r1, qa1_output_file)
-                    logger.info(f"QA1 results exported to: {qa1_output_file}")
-                
-                # Run QA2: Verify Deployment Status
+                # QA2: Verify Setup
                 if args.qa in ["2", "both"]:
                     logger.info("")
-                    r2 = qa2_verify_deployment_status(args.input_csv, namespace, config)
-                    results2_all.extend(r2)
-                    
-                    qa2_output_file = f"qa2_deployment_{namespace}.csv"
-                    qa_export_results(r2, qa2_output_file)
+                    r_setup = qa1_verify_setup(args.input_csv, namespace, config)
+                    results_setup.extend(r_setup)
+
+                    qa2_output_file = f"qa2_setup_{namespace}.csv"
+                    qa_export_results(r_setup, qa2_output_file)
                     logger.info(f"QA2 results exported to: {qa2_output_file}")
-            
-            # Merge results: prefer QA2 when both ran (one row per workshop)
+
+                # QA3: Verify Deployment Status
+                if args.qa in ["3", "both"]:
+                    logger.info("")
+                    r_deploy = qa2_verify_deployment_status(args.input_csv, namespace, config)
+                    results_deploy.extend(r_deploy)
+
+                    qa3_output_file = f"qa3_deployment_{namespace}.csv"
+                    qa_export_results(r_deploy, qa3_output_file)
+                    logger.info(f"QA3 results exported to: {qa3_output_file}")
+
+            # Merge results: prefer deploy when both ran (one row per workshop)
             if args.qa == "both":
-                all_results = _merge_qa1_qa2(results1_all, results2_all)
+                all_results = _merge_qa1_qa2(results_setup, results_deploy)
             elif args.qa == "1":
-                all_results = results1_all
+                all_results = results_catalog
+            elif args.qa == "2":
+                all_results = results_setup
             else:
-                all_results = results2_all
-            
+                all_results = results_deploy
+
             # Export combined / final results
             tag = "combined" if args.qa == "both" else f"qa{args.qa}"
             combined_output_file = f"qa_{tag}_{'_'.join(namespaces)}.csv"
             qa_export_results(all_results, combined_output_file)
             logger.info(f"QA results exported to: {combined_output_file}")
-            
+
             student_landing_file = f"student_landing_page_{'_'.join(namespaces)}.csv"
             export_student_landing_page_csv(all_results, student_landing_file)
             logger.info(f"Student landing page CSV exported to: {student_landing_file}")
