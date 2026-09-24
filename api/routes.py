@@ -182,7 +182,7 @@ def _restore_persisted_state() -> None:
         for row in restored_qa:
             try:
                 loaded.append(QAResultItem(**_normalize_qa_result_dict(row)))
-            except Exception as exc:  # noqa: BLE001 — skip bad rows, keep rest
+            except Exception as exc:
                 logger.warning("Skipping persisted QA row: %s", exc)
         if loaded:
             _qa_results = loaded

@@ -8,8 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from rhdp_flow import (
-    cleanup_multi_asset_shell_workshops,
     _MULTI_ASSET_SHELL_CLEANUP_POLLS,
+    cleanup_multi_asset_shell_workshops,
 )
 from tests.test_rhdp_flow import make_config
 

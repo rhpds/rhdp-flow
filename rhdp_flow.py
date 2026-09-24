@@ -5100,7 +5100,7 @@ def _enrich_qa_result_with_showroom(result: dict, schedule, config) -> None:
         return
     try:
         health = check_showroom_health(schedule, config)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Showroom health enrich failed for %s: %s", schedule.ci_name, exc)
         result["showroom_status"] = "error"
         result["showroom_url"] = ""
