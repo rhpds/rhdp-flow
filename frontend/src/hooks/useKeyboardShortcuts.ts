@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 
 /**
  * Keyboard shortcuts for tab navigation and help.
- * @param onTabChange - callback to switch tabs (1-5)
+ * @param onTabChange - callback to switch tabs (1–4)
  * @param onHelp - callback to toggle help overlay
  * @param enabled - when false, shortcuts are not registered (e.g. full-screen schedule editor)
  */
@@ -27,12 +27,9 @@ export function useKeyboardShortcuts(
           onTabChange('deployments');
           break;
         case '3':
-          onTabChange('operations');
-          break;
-        case '4':
           onTabChange('qa');
           break;
-        case '5':
+        case '4':
           onTabChange('students');
           break;
         case '?':

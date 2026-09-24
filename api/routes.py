@@ -157,10 +157,15 @@ def _save_schedules() -> None:
     _flow_state.save_schedules(_schedules, filename=_current_filename)
 
 
+def _save_qa_results() -> None:
+    _flow_state.save_qa_results(_qa_results)
+
+
 def _restore_persisted_state() -> None:
-    global _schedules, _current_filename, _deployment_results
+    global _schedules, _current_filename, _deployment_results, _qa_results
     restored_schedules, filename = _flow_state.load_schedules(WorkshopSchedule)
     restored_results = _flow_state.load_results(DeploymentResult)
+    restored_qa = _flow_state.load_qa_results()
     if restored_schedules:
         _schedules = restored_schedules
         _current_filename = filename
@@ -172,11 +177,20 @@ def _restore_persisted_state() -> None:
     if restored_results:
         _deployment_results = restored_results
         logger.info("Restored %d deployment result(s) from disk", len(_deployment_results))
+    if restored_qa:
+        loaded: list[QAResultItem] = []
+        for row in restored_qa:
+            try:
+                loaded.append(QAResultItem(**_normalize_qa_result_dict(row)))
+            except Exception as exc:  # noqa: BLE001 — skip bad rows, keep rest
+                logger.warning("Skipping persisted QA row: %s", exc)
+        if loaded:
+            _qa_results = loaded
+            logger.info("Restored %d QA result(s) from disk", len(_qa_results))
 
-
-_restore_persisted_state()
 
 # Session history — each completed upload+deploy cycle gets archived here
+# (persisted state is restored after helper defs below — see _restore_persisted_state call)
 _sessions: list[dict] = []
 _session_counter: int = 0
 MAX_SESSIONS = 50
@@ -369,6 +383,7 @@ def _normalize_qa_result_dict(r: dict) -> dict:
     return out
 
 
+_restore_persisted_state()
 
 
 # Cached base domain derived from the connected cluster
@@ -2686,13 +2701,8 @@ def op_import_namespace(request: Request, namespace: str, _key=Depends(verify_ap
 def qa_namespaces():
     """Return unique namespaces from loaded schedules for the QA namespace selector."""
     if not _schedules:
-        # Return common namespaces even if no schedules loaded
-        return [
-            "user-bbethell-redhat-com",
-            "user-vaguiler-redhat-com",
-            "user-yvarbev-redhat-com",
-        ]
-    return list(dict.fromkeys(s.namespace for s in _schedules))
+        return []
+    return list(dict.fromkeys(s.namespace for s in _schedules if s.namespace))
 
 
 @router.post("/qa/run")
@@ -2751,6 +2761,7 @@ def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(verify_
         with _state_lock:
             _qa_results = all_results
             _qa_log_path = log_path
+        _save_qa_results()
         return {
             "count": len(all_results),
             "results": all_results,

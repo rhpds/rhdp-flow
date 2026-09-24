@@ -242,6 +242,7 @@ export interface QAResult {
   landing_page_url?: string;
   showroom_status?: string;
   showroom_url?: string;
+  issues?: string;
   [key: string]: unknown;
 }
 

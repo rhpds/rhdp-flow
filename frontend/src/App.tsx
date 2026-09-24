@@ -42,15 +42,16 @@ const ScheduleEditPage = lazy(() =>
   import('./components/ScheduleEditPage').then(m => ({ default: m.ScheduleEditPage })),
 );
 const DeploymentsTab = lazy(() => import('./components/DeploymentsTab').then(m => ({ default: m.DeploymentsTab })));
-const OperationsTab = lazy(() => import('./components/OperationsTab').then(m => ({ default: m.OperationsTab })));
 const QATab = lazy(() => import('./components/QATab').then(m => ({ default: m.QATab })));
 const StudentsTab = lazy(() => import('./components/StudentsTab').then(m => ({ default: m.StudentsTab })));
 
-const VALID_TABS = ['upload', 'deployments', 'operations', 'qa', 'students'];
+const VALID_TABS = ['upload', 'deployments', 'qa', 'students'];
 
-function getTabFromHash(): string {
+function getTabFromHash(): { tab: string; fromOps: boolean } {
   const hash = window.location.hash.replace('#', '');
-  return VALID_TABS.includes(hash) ? hash : 'upload';
+  // Legacy Operations tab → QA (day-2 actions live in Babylon Admin Ops / Labagator)
+  if (hash === 'operations') return { tab: 'qa', fromOps: true };
+  return { tab: VALID_TABS.includes(hash) ? hash : 'upload', fromOps: false };
 }
 
 const App: React.FC = () => {
@@ -62,7 +63,8 @@ const App: React.FC = () => {
 
   const { theme, toggleTheme } = useTheme();
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
-  const [activeTab, setActiveTab] = useState<string | number>(getTabFromHash);
+  const initialHash = useMemo(() => getTabFromHash(), []);
+  const [activeTab, setActiveTab] = useState<string | number>(initialHash.tab);
   const [dryRun, setDryRun] = useState(true);
   const [schedules, setSchedules] = useState<WorkshopSchedule[]>([]);
   const [results, setResults] = useState<DeploymentResult[]>([]);
@@ -80,6 +82,16 @@ const App: React.FC = () => {
     setToast({ msg, variant });
     toastTimer.current = setTimeout(() => setToast(null), TOAST_DURATION_MS);
   }, []);
+
+  // One-shot nudge if someone still has #operations bookmarked
+  useEffect(() => {
+    if (!initialHash.fromOps) return;
+    window.history.replaceState(null, '', '#qa');
+    showToast(
+      'Day-2 actions (lock, extend, scale) live in Babylon Admin Ops — embedded in Labagator. QA is here for verification.',
+      'info',
+    );
+  }, [initialHash.fromOps, showToast]);
 
   const handleSessionView = useCallback((data: { schedules: WorkshopSchedule[]; results: DeploymentResult[]; qa_results: QAResult[]; operator_overrides?: OperatorOverride[] }) => {
     setSchedules(data.schedules);
@@ -174,7 +186,6 @@ const App: React.FC = () => {
     const tabNames: Record<string, string> = {
       upload: 'Upload & Deploy',
       deployments: 'Deployments',
-      operations: 'Operations',
       qa: 'QA',
       students: 'Students',
     };
@@ -190,11 +201,20 @@ const App: React.FC = () => {
       setLocationHash(h);
       const key = h.replace(/^#/, '') || 'upload';
       if (key === 'edit') return;
+      if (key === 'operations') {
+        setActiveTab('qa');
+        window.history.replaceState(null, '', '#qa');
+        showToast(
+          'Day-2 actions live in Babylon Admin Ops (Labagator). Use QA here to verify deploys.',
+          'info',
+        );
+        return;
+      }
       if (VALID_TABS.includes(key)) setActiveTab(key);
     };
     window.addEventListener('hashchange', handler);
     return () => window.removeEventListener('hashchange', handler);
-  }, []);
+  }, [showToast]);
 
   // Keyboard shortcuts
   const handleTabShortcut = useCallback((tab: string) => setActiveTab(tab), []);
@@ -342,11 +362,6 @@ const App: React.FC = () => {
                 />
               </Suspense>
             </Tab>
-            <Tab eventKey="operations" title={<TabTitleText>Operations</TabTitleText>}>
-              <Suspense fallback={<Spinner />}>
-                <OperationsTab showToast={showToast} schedules={schedules} />
-              </Suspense>
-            </Tab>
             <Tab
               eventKey="qa"
               title={<TabTitleText>QA{qaResults.length > 0 && <Badge className="tab-badge" isRead>{qaResults.length}</Badge>}</TabTitleText>}
@@ -356,6 +371,7 @@ const App: React.FC = () => {
                   qaResults={qaResults}
                   setQAResults={setQAResults}
                   showToast={showToast}
+                  schedules={schedules}
                 />
               </Suspense>
             </Tab>
@@ -385,9 +401,8 @@ const App: React.FC = () => {
               {[
                 ['1', 'Upload & Deploy tab'],
                 ['2', 'Deployments tab'],
-                ['3', 'Operations tab'],
-                ['4', 'QA tab'],
-                ['5', 'Students tab'],
+                ['3', 'QA tab'],
+                ['4', 'Students tab'],
                 ['?', 'Toggle this help'],
               ].map(([key, desc]) => (
                 <tr key={key} style={{ borderBottom: '1px solid var(--pf-v6-global--BorderColor--100, #d2d2d2)' }}>

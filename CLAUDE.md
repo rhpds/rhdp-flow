@@ -63,12 +63,13 @@ React 18.2 + PatternFly 6 + Vite. Components in `frontend/src/components/`:
 |-----------|-----|--------------|
 | `UploadTab.tsx` | Upload & Deploy | CSV upload, schedule table, per-row redirect toggle, deploy settings, diff view |
 | `DeploymentsTab.tsx` | Deployments | Results table, status cards, search/filter, auto-refresh, retry, CSV export |
-| `OperationsTab.tsx` | Operations | Lock, Extend Stop/Destroy, Scale — each with per-CI target filter |
-| `QATab.tsx` | QA | QA1/QA2 type selector, run/refresh, results table, status filter, CSV export |
+| `QATab.tsx` | QA | QA1/QA2/QA3, namespace scope, showroom via QA2, results + Issues; day-2 actions → Babylon Admin Ops (Labagator) |
 | `StudentsTab.tsx` | Students | Landing page URLs, copy-to-clipboard, CSV export |
 | `SessionHistory.tsx` | (toolbar) | Prior session dropdown, view/back controls |
 | `DiffView.tsx` | (in Upload) | Compare schedules — added/removed/changed |
 | `HealthBadge.tsx` | (masthead) | Cluster connection status |
+
+> **Note:** Flow UI no longer has an Operations tab. Lock/extend/scale/showroom-cleanup stay on the API (`/api/operations/*`) for CLI/automation; operators use **Babylon Admin Ops** (embedded in Labagator). Showroom *health* is folded into QA2.
 
 Shared: `constants.ts`, `utils/statusColors.ts`, `services/api.ts`, `types/index.ts`, `hooks/useTheme.ts`, `hooks/useKeyboardShortcuts.ts`, `hooks/useAutoRefresh.ts`
 
@@ -127,7 +128,7 @@ These were discovered through extensive debugging. Follow them exactly:
 | 1 | `01-upload-and-schedule` | CSV upload, schedule table, row expand |
 | 2 | `02-deploy-settings` | Lock UI, White Glove, Redirect toggles, dry-run deploy |
 | 3 | `03-deployments-tab` | Results, status cards, search/filter, export |
-| 4 | `04-operations-tab` | Lock, Extend Stop/Destroy, Scale, CI filter, history |
+| 4 | `04-operations-tab` | _(legacy)_ Lock/Extend/Scale — now use Babylon Admin Ops in Labagator |
 | 5 | `05-qa-and-students` | QA types, run QA, students, export |
 | 6 | `06-extras` | Live mode, dark mode, shortcuts, diff view |
 

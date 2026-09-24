@@ -41,6 +41,15 @@ def _meta_path() -> Path:
     return data_dir() / "last_meta.json"
 
 
+def _qa_results_path() -> Path:
+    return Path(
+        os.environ.get(
+            "RHDP_QA_RESULTS_FILE",
+            str(data_dir() / "last_qa_results.json"),
+        )
+    ).expanduser()
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -102,9 +111,39 @@ def load_results(result_cls: type[T]) -> list[T]:
         return []
 
 
+def save_qa_results(results: list[Any]) -> None:
+    """Persist QA results (list of dicts or model_dump()-able objects)."""
+    try:
+        payload = []
+        for r in results:
+            if hasattr(r, "model_dump"):
+                payload.append(r.model_dump())
+            elif is_dataclass(r):
+                payload.append(asdict(r))
+            elif isinstance(r, dict):
+                payload.append(r)
+            else:
+                payload.append(dict(r))
+        _write_json(_qa_results_path(), payload)
+    except OSError as exc:
+        logger.warning("Could not persist QA results: %s", exc)
+
+
+def load_qa_results() -> list[dict]:
+    """Load persisted QA results as plain dicts (caller validates into models)."""
+    try:
+        data = _read_json(_qa_results_path())
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if isinstance(row, dict)]
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning("Could not load persisted QA results: %s", exc)
+        return []
+
+
 def clear_persisted_state() -> None:
     """Remove schedule/result files (session clear)."""
-    for path in (_schedules_path(), _results_path(), _meta_path()):
+    for path in (_schedules_path(), _results_path(), _meta_path(), _qa_results_path()):
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:

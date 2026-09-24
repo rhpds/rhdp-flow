@@ -41,6 +41,15 @@ def test_clear_persisted_state(tmp_path, monkeypatch):
     monkeypatch.setenv("RHDP_FLOW_DATA_DIR", str(tmp_path))
     flow_state.save_schedules([_Sched("A", "a.prod")], filename="x.csv")
     flow_state.save_results([_Result("A", "a.prod")])
+    flow_state.save_qa_results([{"ci_name": "A", "ci": "a.prod", "namespace": "ns", "status": "ok"}])
     flow_state.clear_persisted_state()
     assert flow_state.load_schedules(_Sched) == ([], "")
     assert flow_state.load_results(_Result) == []
+    assert flow_state.load_qa_results() == []
+
+
+def test_qa_results_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("RHDP_FLOW_DATA_DIR", str(tmp_path))
+    rows = [{"ci_name": "A", "ci": "a.prod", "namespace": "ns", "status": "VERIFIED"}]
+    flow_state.save_qa_results(rows)
+    assert flow_state.load_qa_results() == rows

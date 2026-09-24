@@ -37,6 +37,12 @@ function seatsDisplay(r: QAResult): string {
   return `${exp} / ${act}`;
 }
 
+function issuesDisplay(r: QAResult): string {
+  const raw = r.issues;
+  if (raw === null || raw === undefined || raw === '') return '';
+  return String(raw).trim();
+}
+
 type SortableQAColumn = 'ci_name' | 'ci' | 'status';
 
 /** Extracted QA results table with sorting + pagination */
@@ -79,10 +85,12 @@ export const QAResultsTable: React.FC<{
     return groups;
   }, [sorted]);
 
-  const [expandedNamespaces, setExpandedNamespaces] = useState<Set<string>>(new Set(Object.keys(groupedByNamespace)));
+  const [expandedNamespaces, setExpandedNamespaces] = useState<Set<string>>(
+    () => new Set(Object.keys(groupedByNamespace)),
+  );
 
   const toggleNamespace = (ns: string) => {
-    setExpandedNamespaces(prev => {
+    setExpandedNamespaces((prev) => {
       const next = new Set(prev);
       if (next.has(ns)) {
         next.delete(ns);
@@ -107,33 +115,134 @@ export const QAResultsTable: React.FC<{
     columnIndex: 0,
   });
 
-  const renderTableRow = (r: QAResult) => (
-    <Tr key={`${r.ci_name}-${r.ci}-${r.namespace}`}>
-      <Td dataLabel="CI Name">
-        <div>{r.ci_name}</div>
-        <div className="qa-ci-meta" title={r.ci}>{r.ci}</div>
-      </Td>
-      {!groupByNamespace && <Td dataLabel="Namespace">{r.namespace || '-'}</Td>}
-      <Td dataLabel="Status"><span className={statusColorClass(r.status)}>{(() => { const Icon = statusIcon(r.status); return Icon ? <Icon style={{ marginRight: 4 }} /> : null; })()}{r.status}</span></Td>
-      <Td dataLabel="Deployed">{r.deployed || '-'}</Td>
-      <Td dataLabel="Healthy"><span className={healthyColorClass(r.healthy)}>{healthyDisplay(r.healthy)}</span></Td>
-      <Td dataLabel="Seats">{seatsDisplay(r)}</Td>
-      <Td dataLabel="Landing Page URL">
-        {r.landing_page_url ? (
-          <a href={r.landing_page_url} target="_blank" rel="noopener noreferrer" className="cell-truncate" title={r.landing_page_url}>
-            {r.landing_page_url}
-          </a>
-        ) : '-'}
-      </Td>
+  const showShowroomCol = useMemo(
+    () => qaResults.some((r) => r.showroom_status || r.showroom_url),
+    [qaResults],
+  );
+
+  const renderTableRow = (r: QAResult) => {
+    const issues = issuesDisplay(r);
+    return (
+      <Tr key={`${r.ci_name}-${r.ci}-${r.namespace}`}>
+        <Td dataLabel="CI Name">
+          <div>{r.ci_name}</div>
+          <div className="qa-ci-meta" title={r.ci}>{r.ci}</div>
+        </Td>
+        {!groupByNamespace && <Td dataLabel="Namespace">{r.namespace || '-'}</Td>}
+        <Td dataLabel="Status">
+          <span className={statusColorClass(r.status)}>
+            {(() => {
+              const Icon = statusIcon(r.status);
+              return Icon ? <Icon style={{ marginRight: 4 }} /> : null;
+            })()}
+            {r.status}
+          </span>
+        </Td>
+        <Td dataLabel="Deployed">{r.deployed || '-'}</Td>
+        <Td dataLabel="Healthy">
+          <span className={healthyColorClass(r.healthy)}>{healthyDisplay(r.healthy)}</span>
+        </Td>
+        <Td dataLabel="Seats">{seatsDisplay(r)}</Td>
+        <Td dataLabel="Issues">
+          {issues ? (
+            <span className="status-failed" title={issues} style={{ fontSize: '0.85rem' }}>
+              {issues.length > 120 ? `${issues.slice(0, 117)}…` : issues}
+            </span>
+          ) : (
+            '-'
+          )}
+        </Td>
+        {showShowroomCol && (
+          <Td dataLabel="Showroom">
+            {r.showroom_status || r.showroom_url ? (
+              <div>
+                <span
+                  className={
+                    String(r.showroom_status).toLowerCase() === 'healthy'
+                      ? 'status-verified'
+                      : String(r.showroom_status).toLowerCase().includes('unhealthy') ||
+                          String(r.showroom_status).toLowerCase() === 'error'
+                        ? 'status-failed'
+                        : ''
+                  }
+                >
+                  {r.showroom_status || '—'}
+                </span>
+                {r.showroom_url ? (
+                  <div>
+                    <a
+                      href={r.showroom_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="cell-truncate"
+                      title={r.showroom_url}
+                    >
+                      {r.showroom_url}
+                    </a>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              '-'
+            )}
+          </Td>
+        )}
+        <Td dataLabel="Landing Page URL">
+          {r.landing_page_url ? (
+            <a
+              href={r.landing_page_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="cell-truncate"
+              title={r.landing_page_url}
+            >
+              {r.landing_page_url}
+            </a>
+          ) : (
+            '-'
+          )}
+        </Td>
+      </Tr>
+    );
+  };
+
+  const renderHeader = () => (
+    <Tr>
+      <Th sort={getSortParams('ci_name')} info={{ tooltip: 'Catalog Item display name' }}>
+        CI Name
+      </Th>
+      {!groupByNamespace && (
+        <Th info={{ tooltip: 'Namespace checked during QA' }}>Namespace</Th>
+      )}
+      <Th sort={getSortParams('status')} info={{ tooltip: 'QA verification result: verified or failed' }}>
+        Status
+      </Th>
+      <Th info={{ tooltip: 'Whether the workshop was successfully deployed and running' }}>
+        Deployed
+      </Th>
+      <Th info={{ tooltip: 'Whether the deployed workshop passed health checks' }}>Healthy</Th>
+      <Th info={{ tooltip: 'Expected from CSV / actual provisioned seats when deployed' }}>
+        Seats
+      </Th>
+      <Th info={{ tooltip: 'Mismatch details when status is failed' }}>Issues</Th>
+      {showShowroomCol && (
+        <Th info={{ tooltip: 'Showroom lab health (from QA2 when Showroom_Repo is set)' }}>
+          Showroom
+        </Th>
+      )}
+      <Th info={{ tooltip: 'Student-facing URL — also on the Students tab' }}>
+        Landing Page URL
+      </Th>
     </Tr>
   );
 
   return (
     <>
-      <Title headingLevel="h3" style={{ marginBottom: 8 }}>{title}</Title>
+      <Title headingLevel="h3" style={{ marginBottom: 8 }}>
+        {title}
+      </Title>
 
       {groupByNamespace ? (
-        // Grouped by namespace view
         <>
           {Object.entries(groupedByNamespace).map(([ns, results]) => (
             <ExpandableSection
@@ -145,42 +254,18 @@ export const QAResultsTable: React.FC<{
             >
               <div className="table-sticky-wrapper">
                 <Table aria-label={`QA results for ${ns}`} variant="compact" className="fixed-table">
-                  <Thead>
-                    <Tr>
-                      <Th sort={getSortParams('ci_name')} info={{ tooltip: 'Catalog Item display name' }}>CI Name</Th>
-                      <Th sort={getSortParams('status')} info={{ tooltip: 'QA verification result: verified or failed' }}>Status</Th>
-                      <Th info={{ tooltip: 'Whether the workshop was successfully deployed and running' }}>Deployed</Th>
-                      <Th info={{ tooltip: 'Whether the deployed workshop passed health checks' }}>Healthy</Th>
-                      <Th info={{ tooltip: 'Expected from CSV / actual provisioned seats when deployed (— for actual if not deployed yet)' }}>Seats</Th>
-                      <Th info={{ tooltip: 'Student-facing URL for accessing the workshop — also available in the Students tab' }}>Landing Page URL</Th>
-                    </Tr>
-                  </Thead>
-                  <Tbody>
-                    {results.map(renderTableRow)}
-                  </Tbody>
+                  <Thead>{renderHeader()}</Thead>
+                  <Tbody>{results.map(renderTableRow)}</Tbody>
                 </Table>
               </div>
             </ExpandableSection>
           ))}
         </>
       ) : (
-        // Flat view with pagination
         <div className="table-sticky-wrapper">
           <Table aria-label="QA results" variant="compact" className="fixed-table" isStickyHeader>
-            <Thead>
-              <Tr>
-                <Th sort={getSortParams('ci_name')} info={{ tooltip: 'Catalog Item display name' }}>CI Name</Th>
-                <Th info={{ tooltip: 'Namespace checked during QA' }}>Namespace</Th>
-                <Th sort={getSortParams('status')} info={{ tooltip: 'QA verification result: verified or failed' }}>Status</Th>
-                <Th info={{ tooltip: 'Whether the workshop was successfully deployed and running' }}>Deployed</Th>
-                <Th info={{ tooltip: 'Whether the deployed workshop passed health checks' }}>Healthy</Th>
-                <Th info={{ tooltip: 'Expected from CSV / actual provisioned seats when deployed (— for actual if not deployed yet)' }}>Seats</Th>
-                <Th info={{ tooltip: 'Student-facing URL for accessing the workshop — also available in the Students tab' }}>Landing Page URL</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              {paginated.map(renderTableRow)}
-            </Tbody>
+            <Thead>{renderHeader()}</Thead>
+            <Tbody>{paginated.map(renderTableRow)}</Tbody>
           </Table>
         </div>
       )}
@@ -190,7 +275,10 @@ export const QAResultsTable: React.FC<{
           perPage={perPage}
           page={page}
           onSetPage={(_e, p) => setPage(p)}
-          onPerPageSelect={(_e, pp) => { setPerPage(pp); setPage(1); }}
+          onPerPageSelect={(_e, pp) => {
+            setPerPage(pp);
+            setPage(1);
+          }}
           perPageOptions={[
             { title: '10', value: 10 },
             { title: '20', value: 20 },

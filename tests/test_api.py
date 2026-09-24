@@ -852,14 +852,10 @@ W1,vendor.w.prod,ns1,10,True,pw,Adm,QA,W1,01/01/2026 09:00,01/01/2026 17:00,02/0
 
 
 def test_qa_namespaces_empty(client):
-    """qa/namespaces returns common namespaces when no schedules loaded."""
+    """qa/namespaces returns empty list when no schedules loaded."""
     resp = client.get("/api/qa/namespaces")
     assert resp.status_code == 200
-    # Should return common namespaces even without schedules loaded
-    namespaces = resp.json()
-    assert isinstance(namespaces, list)
-    assert len(namespaces) > 0
-    assert "user-bbethell-redhat-com" in namespaces
+    assert resp.json() == []
 
 
 def test_qa_namespaces_with_schedules(uploaded_client):

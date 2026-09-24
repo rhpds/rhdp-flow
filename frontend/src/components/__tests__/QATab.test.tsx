@@ -31,4 +31,32 @@ describe('QATab', () => {
     render(<QATab qaResults={[]} setQAResults={noop} showToast={noop} />);
     expect(screen.getByText('Run QA')).toBeInTheDocument();
   });
+
+  it('defaults namespace scope to the only schedule namespace', () => {
+    const schedules = [
+      {
+        ci_name: 'W',
+        ci: 'w.prod',
+        namespace: 'user-bbethell-redhat-com',
+        enable_workshop_interface: true,
+        password: '',
+        activity: 'Workshops',
+        purpose: 'QA',
+        workshop_name: 'W',
+        provisioning_date: '',
+        auto_stop: '',
+        auto_destroy: '',
+      },
+    ];
+    render(
+      <QATab
+        qaResults={[]}
+        setQAResults={noop}
+        showToast={noop}
+        schedules={schedules as never}
+      />,
+    );
+    expect(screen.getByLabelText('QA namespace scope')).toHaveValue('user-bbethell-redhat-com');
+    expect(screen.getByText(/Run QA for bbethell/)).toBeInTheDocument();
+  });
 });

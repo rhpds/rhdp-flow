@@ -5080,7 +5080,39 @@ def qa2_verify_deployment_status(
     logger.info(f"  ❌ Not Deployed: {total_scheduled - total_deployed}")
     logger.info("=" * 70)
 
+    # Enrich with Showroom health when the schedule has a Showroom repo
+    # (moved from the old Operations tab — QA is the right place for checks)
+    sched_by_key = {(s.ci, s.namespace or namespace): s for s in scheduled_items}
+    for r in results:
+        key = (r.get("ci"), r.get("namespace") or namespace)
+        schedule = sched_by_key.get(key)
+        if schedule:
+            _enrich_qa_result_with_showroom(r, schedule, config)
+
     return results
+
+
+def _enrich_qa_result_with_showroom(result: dict, schedule, config) -> None:
+    """Attach showroom_status / showroom_url onto a QA result dict (in place)."""
+    if not getattr(schedule, "showroom_repo", ""):
+        result.setdefault("showroom_status", "")
+        result.setdefault("showroom_url", "")
+        return
+    try:
+        health = check_showroom_health(schedule, config)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Showroom health enrich failed for %s: %s", schedule.ci_name, exc)
+        result["showroom_status"] = "error"
+        result["showroom_url"] = ""
+        return
+    status = health.get("status") or ""
+    url = health.get("url") or ""
+    result["showroom_status"] = status
+    result["showroom_url"] = url
+    if status in ("unhealthy", "error"):
+        note = f"Showroom {status}"
+        issues = (result.get("issues") or "").strip()
+        result["issues"] = f"{issues}; {note}" if issues else note
 
 
 def qa3_verify_catalog_items_exist(
