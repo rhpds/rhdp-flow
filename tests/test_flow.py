@@ -11,6 +11,8 @@ from rhdp_flow import (
     export_dry_run_manifest_yaml,
     get_catalog_item_num_users_limit,
     get_catalog_item_parameter_defaults,
+    get_catalog_item_parameter_schemas,
+    validate_schedule_parameter_values,
     verify_deployment,
 )
 from tests.conftest import make_config, make_schedule
@@ -311,6 +313,112 @@ class TestGetCatalogItemParameterDefaults:
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="nope")
         config = make_config()
         assert get_catalog_item_parameter_defaults("missing.ci.prod", config) == {}
+
+
+class TestGetCatalogItemParameterSchemas:
+    """Tests for get_catalog_item_parameter_schemas."""
+
+    @patch("subprocess.run")
+    def test_collects_enum_and_required(self, mock_run):
+        ci_json = {
+            "spec": {
+                "parameters": [
+                    {
+                        "name": "aws_region",
+                        "required": True,
+                        "openAPIV3Schema": {
+                            "type": "string",
+                            "default": "us-east-2",
+                            "enum": ["us-east-2"],
+                        },
+                    },
+                    {
+                        "name": "run_e2e_load_test",
+                        "openAPIV3Schema": {"type": "boolean", "default": False},
+                    },
+                    {"name": "needs_value", "required": True, "openAPIV3Schema": {"type": "string"}},
+                ]
+            }
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(ci_json), stderr="")
+        config = make_config()
+        result = get_catalog_item_parameter_schemas("test.ci.prod", config)
+        assert result is not None
+        assert result["aws_region"]["enum"] == ["us-east-2"]
+        assert result["aws_region"]["required"] is True
+        assert result["aws_region"]["has_default"] is True
+        assert result["needs_value"]["required"] is True
+        assert result["needs_value"]["has_default"] is False
+        assert result["run_e2e_load_test"]["enum"] is None
+
+    @patch("subprocess.run")
+    def test_returns_none_when_unreachable(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+        config = make_config()
+        assert get_catalog_item_parameter_schemas("missing.ci.prod", config) is None
+
+
+class TestValidateScheduleParameterValues:
+    """Tests for validate_schedule_parameter_values."""
+
+    def test_region_not_in_enum_is_error(self):
+        """The lb1161 case: aws_region=us-east-1 but enum=[us-east-2]."""
+        schema = {"aws_region": {"enum": ["us-east-2"], "required": True, "has_default": True}}
+        s = make_schedule(ci="summit-2026.lb1161-sovereign-cloud-cnv.event", aws_regions="us-east-1")
+        result = validate_schedule_parameter_values(s, schema)
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["parameter"] == "aws_region"
+        assert err["value"] == "us-east-1"
+        assert err["allowed"] == ["us-east-2"]
+        assert result["warnings"] == []
+
+    def test_region_in_enum_passes(self):
+        schema = {"aws_region": {"enum": ["us-east-2"], "required": True, "has_default": True}}
+        s = make_schedule(aws_regions="us-east-2")
+        result = validate_schedule_parameter_values(s, schema)
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    def test_underscore_region_normalised(self):
+        """CSV 'us_east_2' normalises to 'us-east-2' (matches flow's own normalisation)."""
+        schema = {"aws_region": {"enum": ["us-east-2"], "has_default": True}}
+        s = make_schedule(aws_regions="us_east_2")
+        assert validate_schedule_parameter_values(s, schema)["errors"] == []
+
+    def test_multi_region_each_checked(self):
+        schema = {"aws_region": {"enum": ["us-east-2"], "has_default": True}}
+        s = make_schedule(aws_regions="us-east-2,us-west-1")
+        result = validate_schedule_parameter_values(s, schema)
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["value"] == "us-west-1"
+
+    def test_no_enum_means_no_error(self):
+        schema = {"aws_region": {"enum": None, "has_default": True}}
+        s = make_schedule(aws_regions="us-east-1")
+        assert validate_schedule_parameter_values(s, schema)["errors"] == []
+
+    def test_region_set_but_param_absent_warns(self):
+        s = make_schedule(aws_regions="us-east-1")
+        result = validate_schedule_parameter_values(s, {"other": {"enum": None}})
+        assert result["errors"] == []
+        assert len(result["warnings"]) == 1
+        assert result["warnings"][0]["parameter"] == "aws_region"
+
+    def test_required_without_default_warns(self):
+        schema = {"secret_key": {"required": True, "has_default": False, "enum": None}}
+        s = make_schedule(aws_regions="")
+        result = validate_schedule_parameter_values(s, schema)
+        assert any(w["parameter"] == "secret_key" for w in result["warnings"])
+
+    def test_required_with_default_is_fine(self):
+        schema = {"aws_region": {"required": True, "has_default": True, "enum": None}}
+        s = make_schedule(aws_regions="")
+        assert validate_schedule_parameter_values(s, schema)["warnings"] == []
+
+    def test_none_schema_returns_empty(self):
+        s = make_schedule(aws_regions="us-east-1")
+        assert validate_schedule_parameter_values(s, None) == {"errors": [], "warnings": []}
 
 
 def test_export_dry_run_manifest_yaml_writes(tmp_path):

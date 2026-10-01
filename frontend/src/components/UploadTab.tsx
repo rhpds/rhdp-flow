@@ -41,7 +41,7 @@ import InfoCircleIcon from '@patternfly/react-icons/dist/esm/icons/info-circle-i
 import { api, getSelectedTarget, selectTargetCluster } from '../services/api';
 import { DiffView } from './DiffView';
 import { CatalogItemSelect } from './CatalogItemSelect';
-import type { WorkshopSchedule, DeploymentResult, NumUsersViolation, UsersNotInCatalogAdvisory, UsersBlankCatalogDefaultAdvisory, ScheduleExampleMeta, LabagatorEventSummary, LabagatorPreviewResponse, LabagatorSessionSummary } from '../types';
+import type { WorkshopSchedule, DeploymentResult, NumUsersViolation, UsersNotInCatalogAdvisory, UsersBlankCatalogDefaultAdvisory, ParameterValidationViolation, ScheduleExampleMeta, LabagatorEventSummary, LabagatorPreviewResponse, LabagatorSessionSummary } from '../types';
 
 /* ── Schedule date validation helpers ── */
 
@@ -329,6 +329,12 @@ export const UploadTab: React.FC<Props> = ({
   const [usersBlankExpanded, setUsersBlankExpanded] = useState(false);
   const [numUsersLimits, setNumUsersLimits] = useState<Record<string, number>>({});
 
+  // Catalog parameter schema validation (e.g. AWS_Region enum)
+  const [paramViolations, setParamViolations] = useState<ParameterValidationViolation[]>([]);
+  const [paramWarnings, setParamWarnings] = useState<ParameterValidationViolation[]>([]);
+  const [paramViolationsExpanded, setParamViolationsExpanded] = useState(false);
+  const [paramWarningsExpanded, setParamWarningsExpanded] = useState(false);
+
   // Catalog namespace validation
   const [catalogNamespaceMismatches, setCatalogNamespaceMismatches] = useState<import('../types').CatalogNamespaceMismatch[]>([]);
   const [catalogNotFound, setCatalogNotFound] = useState<import('../types').CatalogNotFoundItem[]>([]);
@@ -586,6 +592,8 @@ export const UploadTab: React.FC<Props> = ({
     setUsersNotInCatalog([]);
     setUsersBlankCatalogDefault([]);
     setNumUsersLimits({});
+    setParamViolations([]);
+    setParamWarnings([]);
     setCatalogNamespaceMismatches([]);
     setCatalogNotFound([]);
     setCatalogSuffixCorrections([]);
@@ -593,17 +601,20 @@ export const UploadTab: React.FC<Props> = ({
     setSkippedCatalogSummary(null);
     setPoolCapacityWarnings([]);
     setPoolsNotFound([]);
-    const [nsRes, nuRes, cnRes, pcRes] = await Promise.all([
+    const [nsRes, nuRes, cnRes, pcRes, pvRes] = await Promise.all([
       api.validateNamespaces(),
       api.validateNumUsers(),
       api.validateCatalogNamespaces(),
       api.validatePoolCapacity(),
+      api.validateParameters(),
     ]);
     if (nsRes.missing.length) setMissingNamespaces(nsRes.missing);
     if (nuRes.violations.length) setNumUsersViolations(nuRes.violations);
     if (nuRes.users_not_in_catalog?.length) setUsersNotInCatalog(nuRes.users_not_in_catalog);
     if (nuRes.users_blank_catalog_default?.length) setUsersBlankCatalogDefault(nuRes.users_blank_catalog_default);
     if (Object.keys(nuRes.limits).length) setNumUsersLimits(nuRes.limits);
+    if (pvRes.violations?.length) setParamViolations(pvRes.violations);
+    if (pvRes.warnings?.length) setParamWarnings(pvRes.warnings);
     if (cnRes.mismatches.length) {
       setCatalogNamespaceMismatches(cnRes.mismatches);
       // Reflect the corrected namespace in the schedule table so users see where deploy will go
@@ -676,7 +687,7 @@ export const UploadTab: React.FC<Props> = ({
     if (pcRes.not_found?.length) setPoolsNotFound(pcRes.not_found);
     if (cnRes.prod_not_event?.length) setProdNotEvent(cnRes.prod_not_event);
     else setProdNotEvent([]);
-    return { nsRes, nuRes, cnRes, pcRes };
+    return { nsRes, nuRes, cnRes, pcRes, pvRes };
   }, [onOperatorOverrideRecorded]);
 
   const handleValidate = async () => {
@@ -686,7 +697,7 @@ export const UploadTab: React.FC<Props> = ({
     }
     setValidating(true);
     try {
-      const { nsRes, nuRes, cnRes, pcRes } = await refreshClusterValidation();
+      const { nsRes, nuRes, cnRes, pcRes, pvRes } = await refreshClusterValidation();
       const refs = await api.checkTenantClusterRefs(targetCluster);
       setMissingTenantRefs(refs);
       // Namespace mismatches + bare→.prod (no .event) are auto-corrected — only real ambiguity / pool issues need operator action.
@@ -698,14 +709,15 @@ export const UploadTab: React.FC<Props> = ({
       const nNs = nsRes.missing.length;
       const nNu = nuRes.violations.length;
       const nAdv = nuRes.users_not_in_catalog?.length ?? 0;
-      if (nNs === 0 && nNu === 0 && nAdv === 0) {
+      const nPv = pvRes.violations?.length ?? 0;
+      if (nNs === 0 && nNu === 0 && nAdv === 0 && nPv === 0) {
         showToast(
-          'Validation passed: namespaces found on cluster; num_users within catalog limits where checked.',
+          'Validation passed: namespaces found on cluster; num_users and catalog parameters within limits where checked.',
           'success',
         );
       } else {
         showToast(
-          `Validation: ${nNs} missing namespace(s), ${nNu} num_users over limit, ${nAdv} catalog/Users mismatch — see alerts below.`,
+          `Validation: ${nNs} missing namespace(s), ${nNu} num_users over limit, ${nPv} invalid parameter(s), ${nAdv} catalog/Users mismatch — see alerts below.`,
           'info',
         );
       }
@@ -1238,6 +1250,7 @@ export const UploadTab: React.FC<Props> = ({
     highUsersIssues.length > 0;
   const hasBlockingIssues =
     numUsersViolations.length > 0 ||
+    paramViolations.length > 0 ||
     _tenantBlockDirect.length > 0;
   const deployBlocked = hasBlockingIssues;
 
@@ -2108,6 +2121,64 @@ export const UploadTab: React.FC<Props> = ({
                 ))}
               </AffectsItemsList>
               Deployment is blocked until counts are at or below the catalog max. Cap is a local Flow tweak for testing — Labagator remains the event source of truth.
+            </Alert>
+          )}
+
+          {/* Catalog parameter schema violations (e.g. AWS_Region not in enum) */}
+          {paramViolations.length > 0 && (
+            <Alert
+              variant="danger"
+              isInline
+              title={`${paramViolations.length} schedule(s) have invalid catalog parameters`}
+              style={{ marginBottom: 12 }}
+              actionLinks={
+                <Button variant="link" size="sm" onClick={() => setParamViolations([])}>
+                  Dismiss
+                </Button>
+              }
+            >
+              <AffectsItemsList
+                count={paramViolations.length}
+                expanded={paramViolationsExpanded}
+                onToggle={() => setParamViolationsExpanded((v) => !v)}
+                noun="schedule"
+              >
+                {sortByCiName(paramViolations).map((v, i) => (
+                  <li key={i}>
+                    <strong>{v.ci_name}</strong> ({v.ci}): {v.message}
+                  </li>
+                ))}
+              </AffectsItemsList>
+              Deployment is blocked: these values violate the catalog item&apos;s schema and Babylon would reject them at provision time. Fix the value in the CSV (e.g. set AWS_Region to an allowed region, or leave it blank to use the catalog default).
+            </Alert>
+          )}
+
+          {/* Catalog parameter advisories (unknown param / required without default) */}
+          {paramWarnings.length > 0 && (
+            <Alert
+              variant="warning"
+              isInline
+              title={`${paramWarnings.length} catalog parameter advisory(ies)`}
+              style={{ marginBottom: 12 }}
+              actionLinks={
+                <Button variant="link" size="sm" onClick={() => setParamWarnings([])}>
+                  Dismiss
+                </Button>
+              }
+            >
+              <AffectsItemsList
+                count={paramWarnings.length}
+                expanded={paramWarningsExpanded}
+                onToggle={() => setParamWarningsExpanded((v) => !v)}
+                noun="schedule"
+              >
+                {sortByCiName(paramWarnings).map((v, i) => (
+                  <li key={i}>
+                    <strong>{v.ci_name}</strong> ({v.ci}): {v.message}
+                  </li>
+                ))}
+              </AffectsItemsList>
+              These are advisory only — deployment is not blocked.
             </Alert>
           )}
 

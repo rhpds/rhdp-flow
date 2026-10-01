@@ -2831,6 +2831,160 @@ def get_catalog_item_parameter_defaults(
     return {}
 
 
+def get_catalog_item_parameter_schemas(
+    ci: str,
+    config: RHDPConfig,
+    catalog_namespace: str | None = None,
+) -> dict | None:
+    """
+    Load a CatalogItem and return a map of parameter name -> schema summary.
+
+    Each summary: {enum, type, default, has_default, required}. Used to preflight
+    operator-supplied parameter values (notably AWS_Region) against the catalog
+    item's openAPIV3Schema *before* scheduling/deploying, so an invalid value
+    (e.g. aws_region=us-east-1 on an item whose enum is [us-east-2]) is caught here
+    instead of failing later in Babylon provisioning.
+
+    Returns None if the CatalogItem cannot be read on any candidate namespace.
+    """
+    primary = get_catalog_namespace(ci, catalog_namespace)
+    secondary = (
+        "babylon-catalog-event" if primary == "babylon-catalog-prod" else "babylon-catalog-prod"
+    )
+    to_try: list[str] = []
+    if catalog_namespace:
+        to_try.append(catalog_namespace)
+    if primary not in to_try:
+        to_try.append(primary)
+    if secondary not in to_try:
+        to_try.append(secondary)
+    for ns in to_try:
+        data = _try_get_catalog_item_json(ci, ns, config)
+        if data is None:
+            continue
+        spec = data.get("spec", {}) or {}
+        out: dict = {}
+        for name, p in _catalog_item_parameter_defs_by_name(spec).items():
+            schema = p.get("openAPIV3Schema") or {}
+            out[name] = {
+                "enum": schema.get("enum"),
+                "type": schema.get("type"),
+                "default": schema.get("default"),
+                "has_default": "default" in schema,
+                "required": bool(p.get("required", False)),
+            }
+        return out
+    return None
+
+
+# CSV columns that carry operator-supplied CatalogItem *parameter values* (not flow-only
+# fields like dates/names). num_users is validated separately by the num_users checks.
+#   catalog parameter name -> attribute on WorkshopSchedule holding the operator value
+_SCHEDULE_PARAM_VALUE_FIELDS = {
+    "aws_region": "aws_regions",
+}
+# Parameters flow supplies itself (so a required-without-default param of this name is not
+# a "missing required" problem for the operator to fix).
+_FLOW_SUPPLIED_PARAMS = {"num_users", "aws_region"}
+
+
+def _schedule_supplied_param_values(schedule: "WorkshopSchedule") -> dict[str, list[str]]:
+    """Operator-supplied catalog parameter values on a schedule, name -> list of values.
+
+    AWS_Region is comma-separated (multi-region split); values are normalised the same way
+    flow normalises them before ordering (underscore -> hyphen, trimmed).
+    """
+    out: dict[str, list[str]] = {}
+    for param_name, attr in _SCHEDULE_PARAM_VALUE_FIELDS.items():
+        raw = getattr(schedule, attr, "") or ""
+        values = [v.strip().replace("_", "-") for v in str(raw).split(",") if v.strip()]
+        if values:
+            out[param_name] = values
+    return out
+
+
+def validate_schedule_parameter_values(
+    schedule: "WorkshopSchedule",
+    param_schemas: dict | None,
+) -> dict:
+    """Validate a schedule's operator-supplied parameter values against catalog schemas.
+
+    Returns {"errors": [...], "warnings": [...]}. Each entry carries ci/ci_name/namespace,
+    parameter, value, allowed, severity and a human message.
+
+    - errors: hard blockers — the value violates the parameter's enum, so Babylon will
+      reject the order (e.g. aws_region=us-east-1 when enum=[us-east-2]).
+    - warnings: advisory — an operator value is set for a parameter the item does not
+      expose (so it will be ignored), or a required parameter has no default and flow
+      does not supply it.
+    """
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    if not param_schemas:
+        return {"errors": errors, "warnings": warnings}
+
+    supplied = _schedule_supplied_param_values(schedule)
+    for param_name, values in supplied.items():
+        schema = param_schemas.get(param_name)
+        if schema is None:
+            warnings.append({
+                "ci_name": schedule.ci_name,
+                "ci": schedule.ci,
+                "namespace": schedule.namespace,
+                "parameter": param_name,
+                "value": ",".join(values),
+                "allowed": None,
+                "severity": "medium",
+                "message": (
+                    f"{param_name} set to '{','.join(values)}' but the catalog item exposes "
+                    f"no '{param_name}' parameter — the value will be ignored."
+                ),
+            })
+            continue
+        enum = schema.get("enum")
+        if enum:
+            allowed = [str(e) for e in enum]
+            for value in values:
+                if value not in allowed:
+                    errors.append({
+                        "ci_name": schedule.ci_name,
+                        "ci": schedule.ci,
+                        "namespace": schedule.namespace,
+                        "parameter": param_name,
+                        "value": value,
+                        "allowed": allowed,
+                        "severity": "high",
+                        "message": (
+                            f"{param_name}='{value}' is not allowed; must be one of "
+                            f"{allowed}."
+                        ),
+                    })
+
+    # Required parameters with no default that flow does not supply -> Babylon order fails.
+    for name, schema in param_schemas.items():
+        if not schema.get("required"):
+            continue
+        if schema.get("has_default"):
+            continue
+        if name in _FLOW_SUPPLIED_PARAMS or name in supplied:
+            continue
+        warnings.append({
+            "ci_name": schedule.ci_name,
+            "ci": schedule.ci,
+            "namespace": schedule.namespace,
+            "parameter": name,
+            "value": None,
+            "allowed": schema.get("enum") and [str(e) for e in schema["enum"]],
+            "severity": "high",
+            "message": (
+                f"required parameter '{name}' has no default and is not supplied — "
+                f"the Babylon order may fail."
+            ),
+        })
+
+    return {"errors": errors, "warnings": warnings}
+
+
 def find_similar_catalog_items(ci: str, namespace: str, config: RHDPConfig, limit: int = 5) -> list[str]:
     """
     Find catalog items with similar names (fuzzy match).

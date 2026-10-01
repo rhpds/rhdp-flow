@@ -247,6 +247,8 @@ export const api = {
     request<{ namespaces: Record<string, boolean>; missing: string[] }>('/schedules/validate-namespaces', { method: 'POST', body: '{}' }),
   validateNumUsers: () =>
     request<NumUsersValidationResponse>('/schedules/validate-num-users', { method: 'POST', body: '{}' }),
+  validateParameters: () =>
+    request<import('../types').ParameterValidationResponse>('/schedules/validate-parameters', { method: 'POST', body: '{}' }),
   validateCatalogNamespaces: () =>
     request<import('../types').CatalogNamespaceValidationResponse>('/schedules/validate-catalog-namespaces', { method: 'POST', body: '{}' }),
   validateClusterTenant: () =>

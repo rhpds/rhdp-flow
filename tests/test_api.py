@@ -29,6 +29,7 @@ from tests.conftest import (
     CLUSTER_TENANT_WRONG_ORDER_CSV,
     SHOWROOM_CSV,
     make_oc_dispatcher,
+    make_schedule,
 )
 
 
@@ -38,6 +39,7 @@ def reset_state():
     routes._schedules = []
     routes._deployment_results = []
     routes._qa_results = []
+    routes._qa_last_scope = None
     routes._csv_filepath = None
     routes._current_filename = ""
     routes._sessions = []
@@ -829,6 +831,24 @@ def test_qa_results_empty(client):
     resp = client.get("/api/qa/results")
     assert resp.status_code == 200
     assert resp.json()["count"] == 0
+    # No run yet → scope is null (Labagator treats this as "no Flow coverage").
+    assert resp.json()["scope"] is None
+
+
+@patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
+@patch("api.routes.qa1_verify_setup")
+def test_qa_results_emits_scope_metadata(mock_qa1, _mock_cfg, uploaded_client):
+    """A completed QA run must publish coverage scope on /qa/results."""
+    mock_qa1.return_value = []
+    _job_id, status = _run_qa_and_wait(uploaded_client, {"type": "2"})
+    assert status["status"] == "completed"
+    scope = uploaded_client.get("/api/qa/results").json()["scope"]
+    assert scope is not None
+    assert scope["floor"] == "event"
+    assert "covered" in scope
+    assert scope["expected_total"] == len(scope["covered"])
+    assert len(scope["covered"]) >= 1
+    assert all("session_date" in row and "namespace" in row for row in scope["covered"])
 
 
 QA_NAMESPACE_FILTER_CSV = """CI Name,CI,Namespace,Users,Enable_workshop_interface,Password,Activity,Purpose,Workshop Name,Provisioning Date (UTC),Auto-stop (UTC),Auto-destroy (UTC)
@@ -1462,6 +1482,59 @@ def test_validate_num_users_cluster_unreachable(mock_limit, uploaded_client):
     data = resp.json()
     assert data["violations"] == []
     assert data.get("users_not_in_catalog") == []
+    assert data["skipped"] == 1
+    assert data["checked"] == 0
+
+
+def test_validate_parameters_no_schedules(client):
+    """Should 400 when no schedules are loaded."""
+    resp = client.post("/api/schedules/validate-parameters")
+    assert resp.status_code == 400
+
+
+@patch("api.routes.get_catalog_item_parameter_schemas")
+def test_validate_parameters_enum_violation(mock_schemas, client):
+    """The lb1161 case: AWS_Region=us-east-1 on an item whose enum is [us-east-2]."""
+    routes._schedules = [
+        make_schedule(
+            ci="summit-2026.lb1161-sovereign-cloud-cnv.event",
+            aws_regions="us-east-1",
+        )
+    ]
+    mock_schemas.return_value = {
+        "aws_region": {"enum": ["us-east-2"], "required": True, "has_default": True}
+    }
+    resp = client.post("/api/schedules/validate-parameters")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["checked"] == 1
+    assert len(data["violations"]) == 1
+    v = data["violations"][0]
+    assert v["parameter"] == "aws_region"
+    assert v["value"] == "us-east-1"
+    assert v["allowed"] == ["us-east-2"]
+
+
+@patch("api.routes.get_catalog_item_parameter_schemas")
+def test_validate_parameters_valid_region(mock_schemas, client):
+    routes._schedules = [make_schedule(aws_regions="us-east-2")]
+    mock_schemas.return_value = {"aws_region": {"enum": ["us-east-2"], "has_default": True}}
+    resp = client.post("/api/schedules/validate-parameters")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["violations"] == []
+    assert data["warnings"] == []
+    assert data["checked"] == 1
+
+
+@patch("api.routes.get_catalog_item_parameter_schemas")
+def test_validate_parameters_cluster_unreachable(mock_schemas, client):
+    routes._schedules = [make_schedule(aws_regions="us-east-1")]
+    mock_schemas.return_value = None
+    resp = client.post("/api/schedules/validate-parameters")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["violations"] == []
     assert data["skipped"] == 1
     assert data["checked"] == 0
 

@@ -223,9 +223,30 @@ export interface QARequest {
   ci_names?: string[] | null;
 }
 
+/** One schedule row a QA run covered (Labagator consumes this for floor coverage). */
+export interface QACoveredRow {
+  ci: string | null;
+  ci_name: string | null;
+  namespace: string | null;
+  session_date: string | null;
+  time_band: string | null;
+}
+
+/** Scope metadata for the last QA run — what QA actually covered. */
+export interface QACoverageScope {
+  floor: 'day' | 'event';
+  floor_date: string | null;
+  time_band: string | null;
+  ci_names: string[] | null;
+  namespaces: string[] | null;
+  covered: QACoveredRow[];
+  expected_total: number;
+}
+
 export interface QAResponse {
   count: number;
   results: QAResult[];
+  scope?: QACoverageScope | null;
   floor?: 'day' | 'event';
   floor_date?: string | null;
   time_band?: string | null;
@@ -336,6 +357,24 @@ export interface NumUsersValidationResponse {
   checked: number;
   skipped: number;
   limits: Record<string, number>;
+}
+
+export interface ParameterValidationViolation {
+  ci_name: string;
+  ci: string;
+  namespace: string;
+  parameter: string;
+  value: string | null;
+  allowed: string[] | null;
+  severity: 'high' | 'medium';
+  message: string;
+}
+
+export interface ParameterValidationResponse {
+  violations: ParameterValidationViolation[];
+  warnings: ParameterValidationViolation[];
+  checked: number;
+  skipped: number;
 }
 
 export interface PoolCapacityWarning {

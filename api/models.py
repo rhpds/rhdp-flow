@@ -494,6 +494,36 @@ class NumUsersValidationResponse(BaseModel):
     limits: dict = Field(default_factory=dict, description="Per-CI maximum map, e.g. {'ci-name': 40}")
 
 
+class ParameterValidationViolation(BaseModel):
+    """An operator-supplied parameter value that violates the catalog item schema."""
+
+    ci_name: str
+    ci: str
+    namespace: str
+    parameter: str
+    value: str | None = None
+    allowed: list[str] | None = None
+    severity: Literal["high", "medium"] = "high"
+    message: str
+
+
+class ParameterValidationResponse(BaseModel):
+    """Response for POST /schedules/validate-parameters."""
+
+    violations: list[ParameterValidationViolation] = Field(
+        default_factory=list,
+        description="Hard blockers — value violates an enum, so the Babylon order will fail",
+    )
+    warnings: list[ParameterValidationViolation] = Field(
+        default_factory=list,
+        description="Advisory — value set for an unknown parameter, or required param without default",
+    )
+    checked: int = 0
+    skipped: int = Field(
+        0, description="Schedules whose catalog item schema could not be read (cluster unreachable)"
+    )
+
+
 class CatalogNamespaceMismatch(BaseModel):
     """A catalog item found in a different namespace than expected."""
 

@@ -65,6 +65,8 @@ from api.models import (
     OperationResponse,
     OperatorOverride,
     OperatorOverrideCreate,
+    ParameterValidationResponse,
+    ParameterValidationViolation,
     PoolCapacityValidationResponse,
     PoolCapacityWarning,
     PoolInfo,
@@ -87,7 +89,12 @@ from api.models import (
 )
 from api.services import labagator_client
 from api.services.labagator_import import transform_labagator_to_flow
-from api.services.qa_scope import build_qa_scopes, filter_schedules_by_scope
+from api.services.qa_scope import (
+    build_qa_coverage,
+    build_qa_scopes,
+    filter_schedules_by_scope,
+    merge_qa_coverage,
+)
 from lib.deploy_pace import deploy_pace_seconds
 from rhdp_flow import (
     DeploymentResult,
@@ -108,6 +115,7 @@ from rhdp_flow import (
     find_similar_catalog_items,
     generate_showroom_applicationset,
     get_catalog_item_num_users_limit,
+    get_catalog_item_parameter_schemas,
     get_catalog_namespace,
     import_namespace_to_csv,
     list_catalog_items,
@@ -130,6 +138,7 @@ from rhdp_flow import (
     utc_timestamp_str,
     validate_catalog_item_exists,
     validate_cluster_before_tenant,
+    validate_schedule_parameter_values,
 )
 
 logger = logging.getLogger("rhdp_flow.api")
@@ -143,6 +152,10 @@ from lib import flow_state as _flow_state
 
 _schedules: list[WorkshopSchedule] = []
 _qa_results: list[QAResultItem] = []
+# Scope metadata for the last QA run — what QA actually covered (floor/band/CI
+# subset + per-row covered list). Emitted on /qa/results so Labagator trusts
+# Flow's coverage instead of guessing it from its own session roster.
+_qa_last_scope: dict | None = None
 _csv_filepath: str | None = None  # stashed for QA functions that need a path
 _current_filename: str = ""
 _asset_passwords: dict[str, str] | None = None
@@ -701,12 +714,13 @@ def _log_operator_overrides(prefix: str = "OPERATOR OVERRIDE") -> None:
 @router.post("/sessions/clear")
 def clear_session(_key=Depends(verify_api_key)):
     """Archive current session and reset state for a new upload."""
-    global _schedules, _deployment_results, _qa_results, _csv_filepath, _current_filename, _asset_passwords, _deploy_log_path, _qa_log_path, _destroy_check_results, _operator_overrides
+    global _schedules, _deployment_results, _qa_results, _qa_last_scope, _csv_filepath, _current_filename, _asset_passwords, _deploy_log_path, _qa_log_path, _destroy_check_results, _operator_overrides
     with _state_lock:
         _archive_current_session()
         _schedules = []
         _deployment_results = []
         _qa_results = []
+        _qa_last_scope = None
         _destroy_check_results = []
         _operator_overrides = []
         _csv_filepath = None
@@ -1414,6 +1428,60 @@ def validate_num_users(_key=Depends(verify_api_key), config=Depends(_request_con
     )
 
 
+@router.post("/schedules/validate-parameters", response_model=ParameterValidationResponse)
+def validate_parameters(_key=Depends(verify_api_key), config=Depends(_request_config)):
+    """Validate operator-supplied parameter values (e.g. AWS_Region) against each catalog
+    item's openAPIV3Schema, before scheduling/deploying.
+
+    Catches values that Babylon would otherwise reject only at provision time — for example
+    aws_region=us-east-1 on an item whose schema pins enum=[us-east-2]. 'violations' are hard
+    blockers (enum mismatch); 'warnings' are advisory (value set for a parameter the item does
+    not expose, or a required parameter with no default that flow does not supply).
+    """
+    if not _schedules:
+        raise HTTPException(400, "No schedules loaded.")
+    violations: list[ParameterValidationViolation] = []
+    warnings: list[ParameterValidationViolation] = []
+    checked = 0
+    skipped = 0
+    schema_cache: dict[str, dict | None] = {}
+    seen: set = set()
+
+    def _check_ci(ci: str, schedule: WorkshopSchedule):
+        nonlocal checked, skipped
+        if ci not in schema_cache:
+            schema_cache[ci] = get_catalog_item_parameter_schemas(ci, config)
+        schemas = schema_cache[ci]
+        if schemas is None:
+            skipped += 1
+            return
+        checked += 1
+        result = validate_schedule_parameter_values(schedule, schemas)
+        for entry in result["errors"]:
+            key = ("err", entry["ci"], entry["namespace"], entry["parameter"], entry["value"])
+            if key not in seen:
+                seen.add(key)
+                violations.append(ParameterValidationViolation(**entry))
+        for entry in result["warnings"]:
+            key = ("warn", entry["ci"], entry["namespace"], entry["parameter"], entry["value"])
+            if key not in seen:
+                seen.add(key)
+                warnings.append(ParameterValidationViolation(**entry))
+
+    for s in _schedules:
+        _check_ci(s.ci, s)
+        if s.is_multi_asset and s.asset_cis:
+            for asset_ci in (c.strip() for c in s.asset_cis.split(",") if c.strip()):
+                _check_ci(asset_ci, s)
+
+    return ParameterValidationResponse(
+        violations=violations,
+        warnings=warnings,
+        checked=checked,
+        skipped=skipped,
+    )
+
+
 @router.post("/schedules/validate-catalog-namespaces", response_model=CatalogNamespaceValidationResponse)
 def validate_catalog_namespaces(_key=Depends(verify_api_key), config=Depends(_request_config)):
     """Check whether catalog items exist in their expected catalog namespaces."""
@@ -1797,6 +1865,8 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
             limit_errors: list[str] = []
             ns_cache: dict[str, tuple] = {}
             not_found_errors: list[str] = []
+            param_errors: list[str] = []
+            param_schema_cache: dict[str, dict | None] = {}
             for s in schedules:
                 if s.users is not None and s.users > 0:
                     if s.ci not in ci_cache:
@@ -1831,6 +1901,15 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                     )
                 elif not exists and found_ns is None:
                     not_found_errors.append(f"{s.ci_name} ({s.ci}): {suggestion}")
+                # Validate operator-supplied parameter values (e.g. AWS_Region) against the
+                # catalog item's enum, using the resolved CI/namespace above.
+                if s.ci not in param_schema_cache:
+                    param_schema_cache[s.ci] = get_catalog_item_parameter_schemas(
+                        s.ci, config_check, s.catalog_namespace or None
+                    )
+                result = validate_schedule_parameter_values(s, param_schema_cache[s.ci])
+                for entry in result["errors"]:
+                    param_errors.append(f"{s.ci_name} ({s.ci}): {entry['message']}")
         finally:
             cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path if body.target_cluster else None)
         if limit_errors:
@@ -1842,6 +1921,11 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
             raise HTTPException(
                 400,
                 f"Catalog items not found — cannot deploy: {'; '.join(not_found_errors)}"
+            )
+        if param_errors:
+            raise HTTPException(
+                400,
+                f"Invalid catalog parameters — cannot deploy: {'; '.join(param_errors)}"
             )
 
     if not body.dry_run:
@@ -2441,6 +2525,8 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
         try:
             ci_cache: dict[str, dict | None] = {}
             limit_errors = []
+            param_errors: list[str] = []
+            param_schema_cache: dict[str, dict | None] = {}
             for s in matching:
                 if s.users is not None and s.users > 0:
                     if s.ci not in ci_cache:
@@ -2450,10 +2536,22 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
                         limit_errors.append(
                             f"{s.ci_name} ({s.ci}): {s.users} users exceeds catalog maximum of {info['maximum']}"
                         )
+                if s.ci not in param_schema_cache:
+                    param_schema_cache[s.ci] = get_catalog_item_parameter_schemas(
+                        s.ci, config_check, s.catalog_namespace or None
+                    )
+                result = validate_schedule_parameter_values(s, param_schema_cache[s.ci])
+                for entry in result["errors"]:
+                    param_errors.append(f"{s.ci_name} ({s.ci}): {entry['message']}")
             if limit_errors:
                 raise HTTPException(
                     400,
                     f"num_users limit exceeded: {'; '.join(limit_errors)}"
+                )
+            if param_errors:
+                raise HTTPException(
+                    400,
+                    f"Invalid catalog parameters — cannot deploy: {'; '.join(param_errors)}"
                 )
 
         finally:
@@ -2997,7 +3095,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     job = jobs.create_job()
 
     async def _run():
-        global _qa_results, _qa_log_path
+        global _qa_results, _qa_log_path, _qa_last_scope
         handler, log_path = start_log_capture("qa", job.job_id)
         config = None
         try:
@@ -3022,6 +3120,16 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 ci_names=ci_names,
                 job_id=job.job_id,
             )
+            # Coverage metadata: what this run actually QA'd (floor/band/CI subset
+            # + per-row list). Labagator consumes this instead of guessing scope.
+            coverage = build_qa_coverage(
+                _schedules,
+                floor=floor,
+                floor_date=floor_date,
+                time_band=time_band,
+                ci_names=ci_names,
+                namespaces=namespaces,
+            )
             # Subset / retry-failed: replace only those CI names; keep prior passes.
             if ci_names:
                 selected = set(ci_names)
@@ -3030,11 +3138,13 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                     all_results = kept + new_results
                     _qa_results = all_results
                     _qa_log_path = log_path
+                    _qa_last_scope = merge_qa_coverage(_qa_last_scope, coverage)
             else:
                 all_results = new_results
                 with _state_lock:
                     _qa_results = all_results
                     _qa_log_path = log_path
+                    _qa_last_scope = coverage
             _save_qa_results()
             if jobs.is_cancel_requested(job.job_id):
                 jobs.update_job(
@@ -3077,7 +3187,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
 
 @router.get("/qa/results")
 def qa_get_results():
-    return {"count": len(_qa_results), "results": _qa_results}
+    return {"count": len(_qa_results), "results": _qa_results, "scope": _qa_last_scope}
 
 
 @router.get("/qa/status/{job_id}", response_model=JobResponse)

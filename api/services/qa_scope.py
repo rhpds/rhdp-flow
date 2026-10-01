@@ -197,3 +197,103 @@ def build_qa_scopes(schedules: Iterable, *, namespace: str | None = None) -> dic
         "unknown_date_count": unknown,
         "dates": dates,
     }
+
+
+def _covered_key(entry: dict) -> tuple:
+    """Stable identity for a covered row (dedupe across cumulative subset runs)."""
+    return (
+        (entry.get("namespace") or ""),
+        (entry.get("ci_name") or ""),
+        (entry.get("ci") or ""),
+        (entry.get("session_date") or ""),
+    )
+
+
+def build_qa_coverage(
+    schedules: Iterable,
+    *,
+    floor: str | None = None,
+    floor_date: str | None = None,
+    time_band: str | None = None,
+    ci_names: Iterable[str] | None = None,
+    namespaces: Iterable[str] | None = None,
+) -> dict:
+    """Describe exactly which schedule rows a QA run covered.
+
+    Labagator consumes this so it can trust Flow's own coverage (what QA actually
+    ran against) instead of reconstructing it from its session roster — the source
+    of the "morning-only run shown as full-day" drift. The scope mirrors
+    ``filter_schedules_by_scope`` and then narrows by namespace subset.
+    """
+    ns_filter: set[str] | None = None
+    if namespaces:
+        ns_filter = {str(n).strip() for n in namespaces if str(n).strip()} or None
+
+    in_scope = filter_schedules_by_scope(
+        schedules,
+        floor=floor,
+        floor_date=floor_date,
+        time_band=time_band,
+        ci_names=ci_names,
+    )
+
+    covered: list[dict] = []
+    for s in in_scope:
+        ns = getattr(s, "namespace", None)
+        if ns_filter is not None and ns not in ns_filter:
+            continue
+        dt = parse_provisioning_dt(getattr(s, "provisioning_date", None))
+        covered.append(
+            {
+                "ci": getattr(s, "ci", None),
+                "ci_name": getattr(s, "ci_name", None),
+                "namespace": ns,
+                "session_date": schedule_floor_date(s),
+                "time_band": time_band_key(dt) if dt else None,
+            }
+        )
+
+    norm_cis = normalize_ci_names(ci_names)
+    floor_mode = (floor or "event").strip().lower()
+    if floor_mode not in VALID_FLOOR:
+        floor_mode = "event"
+    covered_namespaces = sorted({c["namespace"] for c in covered if c["namespace"]})
+
+    return {
+        "floor": floor_mode,
+        "floor_date": normalize_floor_date(floor_date) if floor_date else None,
+        "time_band": time_band if time_band in VALID_TIME_BANDS else None,
+        "ci_names": sorted(norm_cis) if norm_cis else None,
+        "namespaces": sorted(ns_filter) if ns_filter else covered_namespaces,
+        "covered": covered,
+        "expected_total": len(covered),
+    }
+
+
+def merge_qa_coverage(prior: dict | None, latest: dict) -> dict:
+    """Fold a subset/retry run's coverage into the prior cumulative scope.
+
+    Full runs (no ``ci_names``) replace the scope outright — they re-cover the
+    whole floor/event. Subset runs union their ``covered`` rows into the prior
+    scope by identity so earlier passes are not dropped, matching how
+    ``/qa/results`` keeps prior passing rows on a targeted re-run.
+    """
+    if prior is None or not latest.get("ci_names"):
+        return latest
+
+    merged = dict(prior)
+    by_key = {_covered_key(c): c for c in prior.get("covered", [])}
+    for c in latest.get("covered", []):
+        by_key[_covered_key(c)] = c
+    merged["covered"] = list(by_key.values())
+    merged["expected_total"] = len(merged["covered"])
+    merged["namespaces"] = sorted(
+        {c["namespace"] for c in merged["covered"] if c["namespace"]}
+    ) or prior.get("namespaces")
+    # The cumulative scope is no longer limited to one CI subset once broadened.
+    prior_cis = prior.get("ci_names")
+    if prior_cis:
+        merged["ci_names"] = sorted(set(prior_cis) | set(latest.get("ci_names") or []))
+    else:
+        merged["ci_names"] = None
+    return merged
