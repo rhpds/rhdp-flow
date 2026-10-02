@@ -3546,7 +3546,11 @@ def create_multi_workshop_from_group(
     first = group_schedules[0]
 
     # Collect per-asset passwords, num_users, and concurrencies from individual rows
-    asset_cis = ",".join(s.ci for s in group_schedules)
+    # If a single-row CSV format: all CIs are in asset_cis field; otherwise derive from group rows
+    if len(group_schedules) == 1 and group_schedules[0].asset_cis:
+        asset_cis = group_schedules[0].asset_cis
+    else:
+        asset_cis = ",".join(s.ci for s in group_schedules)
     asset_passwords: dict[str, str] = {}
     asset_num_users: dict[str, int] = {}
     asset_concurrencies: dict[str, int] = {}
@@ -5411,6 +5415,11 @@ def _enrich_qa2_results_with_soundcheck(
     if isinstance(namespaces, str):
         namespaces = [namespaces]
 
+    # X-API-Key header for mutating Soundcheck endpoints (POST check-status).
+    # GET requests (kickoff, session poll) don't require it.
+    _sc_api_key = (os.environ.get("SOUNDCHECK_API_KEY") or "").strip()
+    _sc_auth_headers = {"X-API-Key": _sc_api_key} if _sc_api_key else {}
+
     # Collect (schedule, workshop_name, workshop_id) across ALL namespaces so a
     # single kickoff covers the whole run.
     sched_by_ns: dict[str, list] = {}
@@ -5444,13 +5453,15 @@ def _enrich_qa2_results_with_soundcheck(
     if on_progress:
         on_progress(90, f"Soundcheck: checking {len(all_ids)} workshop(s)")
 
-    # Full kickoff — same contract as the Admin Ops batch.
+    # Full kickoff — same contract as the Admin Ops batch. Timeout is kept short
+    # (15 s) so an unreachable Soundcheck doesn't stall the QA job for a minute;
+    # the except block marks affected rows "unreachable" instead of blocking.
     try:
         kick = _http_json(
             "GET",
             f"{base}/api/check?workshop={urllib.parse.quote(','.join(all_ids))}"
             f"&name={urllib.parse.quote(f'Flow QA3 Soundcheck — {len(all_ids)} workshop(s)')}",
-            timeout=60.0,
+            timeout=15.0,
         )
         kickoff_ok = True
         session_id = str(kick.get("session_id") or "")
@@ -5488,6 +5499,7 @@ def _enrich_qa2_results_with_soundcheck(
             f"{base}/api/workshops/check-status",
             body={"workshop_ids": all_ids},
             timeout=30.0,
+            extra_headers=_sc_auth_headers,
         )
         statuses = body.get("statuses") or {}
         check_status_ok = True
@@ -5726,7 +5738,13 @@ def resolve_admin_ops_url(namespace: str | None = None) -> str:
     return base
 
 
-def _http_json(method: str, url: str, body: dict | None = None, timeout: float = 30.0) -> dict:
+def _http_json(
+    method: str,
+    url: str,
+    body: dict | None = None,
+    timeout: float = 30.0,
+    extra_headers: dict | None = None,
+) -> dict:
     """Minimal JSON HTTP helper (stdlib only)."""
     import urllib.error
     import urllib.request
@@ -5736,6 +5754,8 @@ def _http_json(method: str, url: str, body: dict | None = None, timeout: float =
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

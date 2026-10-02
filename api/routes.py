@@ -2906,13 +2906,21 @@ def _run_qa_over(
             # Floor day filter matches the Ops Floor pin so multi-day events
             # don't run Catalog→Setup→Healthy against undeployed later days.
             # Optional ci_names = early-deployed subset or retry-failed.
-            temp_path = _write_qa_csv_for_namespace(
-                ns,
-                floor=floor,
-                floor_date=floor_date,
-                time_band=time_band,
-                ci_names=ci_names,
-            )
+            try:
+                temp_path = _write_qa_csv_for_namespace(
+                    ns,
+                    floor=floor,
+                    floor_date=floor_date,
+                    time_band=time_band,
+                    ci_names=ci_names,
+                )
+            except HTTPException:
+                # This namespace has no schedules in the current floor/band/CI
+                # scope (e.g. a multi-day event where ns B runs day 2 only and
+                # the operator pinned day 1). Skip it rather than aborting the
+                # whole job — other namespaces may still have work to do.
+                logger.info("QA: no in-scope schedules for namespace %s — skipping", ns)
+                continue
             temp_csv_paths.append(temp_path)
 
             if run_setup:

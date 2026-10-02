@@ -16,3 +16,8 @@ data:
   AGNOSTICV_REPO_URL: "git@github.com:rhpds/agnosticv.git"
   AGNOSTICV_CACHE_DIR: "/tmp/agnosticv-cache"
   AGNOSTICV_REFRESH_TTL_SECONDS: "900"
+
+  # Showroom Soundcheck base URL used for QA3 health checks.
+  # Set per environment (overlay patch or `oc set data`).
+  # Leave empty to fall back to the dev endpoint (not recommended for prod).
+  SOUNDCHECK_URL: ""
