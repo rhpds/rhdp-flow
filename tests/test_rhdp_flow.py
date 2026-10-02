@@ -2681,7 +2681,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
 
         sched, result = self._schedule_and_result()
 
-        def fake_http(method, url, body=None, timeout=30.0):
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
             if "/api/check?" in url:
                 return {"session_id": "sess-1"}
             if "/api/sessions/" in url:
@@ -2707,7 +2707,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
 
         sched, result = self._schedule_and_result()
 
-        def fake_http(method, url, body=None, timeout=30.0):
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
             if "/api/check?" in url:
                 return {"session_id": "sess-9"}
             if "/api/sessions/" in url:
@@ -2762,7 +2762,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
 
         kickoffs = []
 
-        def fake_http(method, url, body=None, timeout=30.0):
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
             if "/api/check?" in url:
                 kickoffs.append(url)
                 return {"session_id": "sess-x"}
@@ -2797,7 +2797,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
         sched, result = self._schedule_and_result()
         session_calls = []
 
-        def fake_http(method, url, body=None, timeout=30.0):
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
             if "/api/check?" in url:
                 return {"session_id": "sess-c"}
             if "/api/sessions/" in url:
@@ -2824,7 +2824,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
         sched, result = self._schedule_and_result()
         progress = []
 
-        def fake_http(method, url, body=None, timeout=30.0):
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
             if "/api/check?" in url:
                 return {"session_id": "sess-p"}
             if "/api/sessions/" in url:

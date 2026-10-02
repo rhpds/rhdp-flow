@@ -5,6 +5,7 @@ import CheckCircleIcon from '@patternfly/react-icons/dist/esm/icons/check-circle
 import ExclamationCircleIcon from '@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon';
 import ExclamationTriangleIcon from '@patternfly/react-icons/dist/esm/icons/exclamation-triangle-icon';
 import InProgressIcon from '@patternfly/react-icons/dist/esm/icons/in-progress-icon';
+import MinusCircleIcon from '@patternfly/react-icons/dist/esm/icons/minus-circle-icon';
 import QuestionCircleIcon from '@patternfly/react-icons/dist/esm/icons/question-circle-icon';
 
 export function statusColorClass(status: string): string {
@@ -13,6 +14,7 @@ export function statusColorClass(status: string): string {
   if (s.includes('verified') && !s.includes('unverified')) return 'status-verified';
   if (s.includes('unverified') || s.includes('no_url')) return 'status-deployed_unverified';
   if (s.includes('failed') || s.includes('error')) return 'status-failed';
+  if (s === 'deleted' || s.includes('not yet deployed')) return 'status-deleted';
   return '';
 }
 
@@ -23,6 +25,7 @@ export function statusIcon(status: string): ComponentType<{ style?: CSSPropertie
   if ((s.includes('verified') && !s.includes('unverified')) || s === 'success') return CheckCircleIcon;
   if (s.includes('unverified') || s.includes('no_url')) return ExclamationTriangleIcon;
   if (s.includes('failed') || s.includes('error')) return ExclamationCircleIcon;
+  if (s === 'deleted' || s.includes('not yet deployed')) return MinusCircleIcon;
   return null;
 }
 
@@ -77,6 +80,15 @@ export function getStatusIndicator(status: string): StatusIndicator {
       color: 'var(--pf-v6-global--info-color--100)',
       label: 'In Progress',
       className: 'pf-v6-u-info-color-100',
+    };
+  }
+
+  if (s === 'deleted' || s.includes('not yet deployed')) {
+    return {
+      icon: MinusCircleIcon,
+      color: 'var(--pf-v6-global--Color--200)',
+      label: s === 'deleted' ? 'Deleted' : 'Not Yet Deployed',
+      className: 'pf-v6-u-color-200',
     };
   }
 

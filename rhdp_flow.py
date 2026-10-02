@@ -55,6 +55,17 @@ def _effective_users(schedule: "WorkshopSchedule") -> int | None:
     return None
 
 
+def _schedule_provisioning_started(schedule) -> bool:
+    """True if provisioning_date is in the past — lab should already be on the cluster."""
+    prov = getattr(schedule, 'provisioning_date', None)
+    if not prov:
+        return True
+    dt = parse_date_time(prov, assume_utc=True)
+    if dt is None:
+        return True
+    return datetime.now(UTC) > dt
+
+
 def _expected_total_seats(schedule: "WorkshopSchedule") -> int | None:
     """Expected total seats for UI (Workshop Users Assigned denominator). Instances (e.g. 30) or Users when set."""
     if getattr(schedule, 'instances', None) is not None and schedule.instances > 0:
@@ -4877,14 +4888,16 @@ def qa1_verify_setup(
                 logger.debug(f"Error checking Workshop: {e}")
         
         if not matching_rcs:
-            # Scheduled but not found
+            already_started = _schedule_provisioning_started(schedule)
+            deployed_val = "Deleted" if already_started else "No"
+            status_val = "🗑 DELETED" if already_started else "⏳ NOT YET DEPLOYED"
             result = {
                 "ci_name": schedule.ci_name,
                 "ci": schedule.ci,
                 "namespace": namespace,
                 "scheduled": "Yes",
-                "deployed": "No",
-                "status": "❌ NOT DEPLOYED",
+                "deployed": deployed_val,
+                "status": status_val,
                 "expected_users": _effective_users(schedule) if _effective_users(schedule) is not None else "",
                 "actual_count": 0,
                 "provisioning_date": schedule.provisioning_date,
@@ -4895,9 +4908,12 @@ def qa1_verify_setup(
                 "landing_page_url": ""
             }
             results.append(result)
-            logger.warning(f"❌ {schedule.ci_name} ({schedule.ci}) - Scheduled but NOT deployed")
+            if already_started:
+                logger.info(f"🗑  {schedule.ci_name} ({schedule.ci}) - Not found (deleted or manually removed)")
+            else:
+                logger.warning(f"⏳ {schedule.ci_name} ({schedule.ci}) - Not yet deployed (provisioning date in future)")
             continue
-        
+
         for rc in matching_rcs:
             metadata = rc.get('metadata', {})
             name = metadata.get('name', 'unknown')
@@ -5256,13 +5272,16 @@ def qa2_verify_deployment_status(
                 logger.debug(f"Error checking Workshop: {e}")
         
         if not matching_rcs:
+            already_started = _schedule_provisioning_started(schedule)
+            deployed_val = "Deleted" if already_started else "No"
+            status_val = "🗑 DELETED" if already_started else "⏳ NOT YET DEPLOYED"
             result = {
                 "ci_name": schedule.ci_name,
                 "ci": schedule.ci,
                 "namespace": namespace,
                 "scheduled": "Yes",
-                "deployed": "No",
-                "status": "❌ NOT DEPLOYED",
+                "deployed": deployed_val,
+                "status": status_val,
                 "expected_seats": _effective_users(schedule) if _effective_users(schedule) is not None else "",
                 "actual_seats": 0,
                 "healthy": False,
@@ -5273,7 +5292,10 @@ def qa2_verify_deployment_status(
                 "landing_page_url": ""
             }
             results.append(result)
-            logger.warning(f"❌ {schedule.ci_name} ({schedule.ci}) - Scheduled but NOT deployed")
+            if already_started:
+                logger.info(f"🗑  {schedule.ci_name} ({schedule.ci}) - Not found (deleted or manually removed)")
+            else:
+                logger.warning(f"⏳ {schedule.ci_name} ({schedule.ci}) - Not yet deployed (provisioning date in future)")
             continue
         
         for rc in matching_rcs:
@@ -5415,10 +5437,16 @@ def _enrich_qa2_results_with_soundcheck(
     if isinstance(namespaces, str):
         namespaces = [namespaces]
 
-    # X-API-Key header for mutating Soundcheck endpoints (POST check-status).
-    # GET requests (kickoff, session poll) don't require it.
+    # Auth headers for all Soundcheck calls.
+    # SOUNDCHECK_TOKEN (Bearer) takes precedence over SOUNDCHECK_API_KEY (X-API-Key).
+    _sc_token = (os.environ.get("SOUNDCHECK_TOKEN") or "").strip()
     _sc_api_key = (os.environ.get("SOUNDCHECK_API_KEY") or "").strip()
-    _sc_auth_headers = {"X-API-Key": _sc_api_key} if _sc_api_key else {}
+    if _sc_token:
+        _sc_auth_headers = {"Authorization": f"Bearer {_sc_token}"}
+    elif _sc_api_key:
+        _sc_auth_headers = {"X-API-Key": _sc_api_key}
+    else:
+        _sc_auth_headers = {}
 
     # Collect (schedule, workshop_name, workshop_id) across ALL namespaces so a
     # single kickoff covers the whole run.
@@ -5462,6 +5490,7 @@ def _enrich_qa2_results_with_soundcheck(
             f"{base}/api/check?workshop={urllib.parse.quote(','.join(all_ids))}"
             f"&name={urllib.parse.quote(f'Flow QA3 Soundcheck — {len(all_ids)} workshop(s)')}",
             timeout=15.0,
+            extra_headers=_sc_auth_headers,
         )
         kickoff_ok = True
         session_id = str(kick.get("session_id") or "")
@@ -5471,7 +5500,7 @@ def _enrich_qa2_results_with_soundcheck(
                 if is_cancelled and is_cancelled():
                     logger.info("QA3 Soundcheck cancelled during poll (session %s)", session_id)
                     break
-                detail = _http_json("GET", f"{base}/api/sessions/{session_id}", timeout=30.0)
+                detail = _http_json("GET", f"{base}/api/sessions/{session_id}", timeout=30.0, extra_headers=_sc_auth_headers)
                 session_status = str((detail.get("session") or {}).get("status") or "pending")
                 if on_progress:
                     on_progress(90, f"Soundcheck: {session_status} ({attempt + 1}/12)")
