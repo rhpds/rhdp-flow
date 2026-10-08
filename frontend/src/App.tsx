@@ -42,22 +42,15 @@ const ScheduleEditPage = lazy(() =>
   import('./components/ScheduleEditPage').then(m => ({ default: m.ScheduleEditPage })),
 );
 const DeploymentsTab = lazy(() => import('./components/DeploymentsTab').then(m => ({ default: m.DeploymentsTab })));
-const QATab = lazy(() => import('./components/QATab').then(m => ({ default: m.QATab })));
 const StudentsTab = lazy(() => import('./components/StudentsTab').then(m => ({ default: m.StudentsTab })));
 
-const VALID_TABS = ['upload', 'deployments', 'qa', 'students'];
+const VALID_TABS = ['upload', 'deployments', 'students'];
 
 function getTabFromHash(): { tab: string; fromOps: boolean } {
   const hash = window.location.hash.replace('#', '');
-  const params = new URLSearchParams(window.location.search);
-  const embedded = params.get('embedded') === 'true';
-  // Legacy Operations tab → QA (day-2 actions live in Babylon Admin Ops / Labagator)
-  if (hash === 'operations') return { tab: 'qa', fromOps: true };
-  if (VALID_TABS.includes(hash)) return { tab: hash, fromOps: false };
-  // Labagator /flow embed: land on QA so Floor scope (This day / Full event) is visible.
-  // Standalone Flow still opens Upload & Deploy.
-  if (embedded || params.get('tab') === 'qa') return { tab: 'qa', fromOps: false };
-  return { tab: 'upload', fromOps: false };
+  // Legacy Operations/QA tab → Upload (QA now lives in Labagator)
+  if (hash === 'operations' || hash === 'qa') return { tab: 'upload', fromOps: false };
+  return { tab: VALID_TABS.includes(hash) ? hash : 'upload', fromOps: false };
 }
 
 const App: React.FC = () => {
@@ -192,7 +185,6 @@ const App: React.FC = () => {
     const tabNames: Record<string, string> = {
       upload: 'Upload & Deploy',
       deployments: 'Deployments',
-      qa: 'QA',
       students: 'Students',
     };
     const name = tabNames[String(activeTab)] || 'Upload & Deploy';
@@ -207,13 +199,9 @@ const App: React.FC = () => {
       setLocationHash(h);
       const key = h.replace(/^#/, '') || 'upload';
       if (key === 'edit') return;
-      if (key === 'operations') {
-        setActiveTab('qa');
-        window.history.replaceState(null, '', '#qa');
-        showToast(
-          'Ad-hoc ops → Babylon Admin Ops (Labagator). Great power, great responsibility — scope your selections. QA verifies only.',
-          'info',
-        );
+      if (key === 'operations' || key === 'qa') {
+        setActiveTab('upload');
+        window.history.replaceState(null, '', '#upload');
         return;
       }
       if (VALID_TABS.includes(key)) setActiveTab(key);
@@ -369,19 +357,6 @@ const App: React.FC = () => {
               </Suspense>
             </Tab>
             <Tab
-              eventKey="qa"
-              title={<TabTitleText>QA{qaResults.length > 0 && <Badge className="tab-badge" isRead>{qaResults.length}</Badge>}</TabTitleText>}
-            >
-              <Suspense fallback={<Spinner />}>
-                <QATab
-                  qaResults={qaResults}
-                  setQAResults={setQAResults}
-                  showToast={showToast}
-                  schedules={schedules}
-                />
-              </Suspense>
-            </Tab>
-            <Tab
               eventKey="students"
               title={<TabTitleText>Students{studentsCount > 0 && <Badge className="tab-badge" isRead>{studentsCount}</Badge>}</TabTitleText>}
             >
@@ -407,8 +382,7 @@ const App: React.FC = () => {
               {[
                 ['1', 'Upload & Deploy tab'],
                 ['2', 'Deployments tab'],
-                ['3', 'QA tab'],
-                ['4', 'Students tab'],
+                ['3', 'Students tab'],
                 ['?', 'Toggle this help'],
               ].map(([key, desc]) => (
                 <tr key={key} style={{ borderBottom: '1px solid var(--pf-v6-global--BorderColor--100, #d2d2d2)' }}>
