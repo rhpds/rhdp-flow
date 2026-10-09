@@ -5428,8 +5428,6 @@ def _enrich_qa2_results_with_soundcheck(
     ``{"reachable": bool, "checked": int, "session_status": str}`` so callers can
     surface a degraded Soundcheck instead of reporting a silent pass.
     """
-    import urllib.parse
-
     summary = {"reachable": False, "checked": 0, "session_status": "unknown"}
     if not results:
         return summary
