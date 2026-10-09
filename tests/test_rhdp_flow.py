@@ -2682,12 +2682,14 @@ class TestSoundcheckEnrich(unittest.TestCase):
         sched, result = self._schedule_and_result()
 
         def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
-            if "/api/check?" in url:
-                return {"session_id": "sess-1"}
-            if "/api/sessions/" in url:
-                return {"session": {"status": "completed"}}
+            if url.endswith("/api/groups") and method == "POST":
+                return {"group_id": "grp-1"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                return {"group": {"status": "completed"}}
             if url.endswith("/api/workshops/check-status"):
-                return {"statuses": {"wid-1": {"status": "completed", "session_id": "sess-1"}}}
+                return {"statuses": {"wid-1": {"status": "completed", "session_id": "grp-1"}}}
             return {}
 
         with self._no_sleep(), patch(
@@ -2700,7 +2702,7 @@ class TestSoundcheckEnrich(unittest.TestCase):
 
         self.assertTrue(summary["reachable"])
         self.assertEqual(result["showroom_status"], "healthy")
-        self.assertIn("/session/sess-1", result["showroom_url"])
+        self.assertIn("/group/grp-1", result["showroom_url"])
 
     def test_failed_status_adds_issue(self):
         import rhdp_flow
@@ -2708,12 +2710,14 @@ class TestSoundcheckEnrich(unittest.TestCase):
         sched, result = self._schedule_and_result()
 
         def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
-            if "/api/check?" in url:
-                return {"session_id": "sess-9"}
-            if "/api/sessions/" in url:
-                return {"session": {"status": "failed"}}
+            if url.endswith("/api/groups") and method == "POST":
+                return {"group_id": "grp-9"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                return {"group": {"status": "failed"}}
             if url.endswith("/api/workshops/check-status"):
-                return {"statuses": {"wid-1": {"status": "failed", "session_id": "sess-9"}}}
+                return {"statuses": {"wid-1": {"status": "failed", "session_id": "grp-9"}}}
             return {}
 
         with self._no_sleep(), patch(
@@ -2763,16 +2767,18 @@ class TestSoundcheckEnrich(unittest.TestCase):
         kickoffs = []
 
         def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
-            if "/api/check?" in url:
-                kickoffs.append(url)
-                return {"session_id": "sess-x"}
-            if "/api/sessions/" in url:
-                return {"session": {"status": "completed"}}
+            if url.endswith("/api/groups") and method == "POST":
+                kickoffs.append(body or {})
+                return {"group_id": "grp-x"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                return {"group": {"status": "completed"}}
             if url.endswith("/api/workshops/check-status"):
                 return {
                     "statuses": {
-                        "wid-a": {"status": "completed", "session_id": "sess-x"},
-                        "wid-b": {"status": "completed", "session_id": "sess-x"},
+                        "wid-a": {"status": "completed", "session_id": "grp-x"},
+                        "wid-b": {"status": "completed", "session_id": "grp-x"},
                     }
                 }
             return {}
@@ -2784,10 +2790,10 @@ class TestSoundcheckEnrich(unittest.TestCase):
                 [r1, r2], [s1, s2], ["ns-a", "ns-b"], make_config()
             )
 
-        # One batched kickoff covering both namespaces' workshop ids.
+        # One batched group creation covering both namespaces' workshop ids.
         self.assertEqual(len(kickoffs), 1)
-        self.assertIn("wid-a", kickoffs[0])
-        self.assertIn("wid-b", kickoffs[0])
+        self.assertIn("wid-a", kickoffs[0].get("workshop_guids", []))
+        self.assertIn("wid-b", kickoffs[0].get("workshop_guids", []))
         self.assertEqual(r1["showroom_status"], "healthy")
         self.assertEqual(r2["showroom_status"], "healthy")
 
@@ -2795,14 +2801,16 @@ class TestSoundcheckEnrich(unittest.TestCase):
         import rhdp_flow
 
         sched, result = self._schedule_and_result()
-        session_calls = []
+        group_detail_calls = []
 
         def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
-            if "/api/check?" in url:
-                return {"session_id": "sess-c"}
-            if "/api/sessions/" in url:
-                session_calls.append(url)
-                return {"session": {"status": "pending"}}
+            if url.endswith("/api/groups") and method == "POST":
+                return {"group_id": "grp-c"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                group_detail_calls.append(url)
+                return {"group": {"status": "pending"}}
             if url.endswith("/api/workshops/check-status"):
                 return {"statuses": {}}
             return {}
@@ -2815,8 +2823,8 @@ class TestSoundcheckEnrich(unittest.TestCase):
                 [result], [sched], ["user-ns"], make_config(), is_cancelled=lambda: True
             )
 
-        # Cancel is checked at the top of the poll loop, so no session poll runs.
-        self.assertEqual(session_calls, [])
+        # Cancel is checked at the top of the poll loop, so no group detail poll runs.
+        self.assertEqual(group_detail_calls, [])
 
     def test_progress_callback_invoked(self):
         import rhdp_flow
@@ -2825,12 +2833,14 @@ class TestSoundcheckEnrich(unittest.TestCase):
         progress = []
 
         def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
-            if "/api/check?" in url:
-                return {"session_id": "sess-p"}
-            if "/api/sessions/" in url:
-                return {"session": {"status": "completed"}}
+            if url.endswith("/api/groups") and method == "POST":
+                return {"group_id": "grp-p"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                return {"group": {"status": "completed"}}
             if url.endswith("/api/workshops/check-status"):
-                return {"statuses": {"wid-1": {"status": "completed", "session_id": "sess-p"}}}
+                return {"statuses": {"wid-1": {"status": "completed", "session_id": "grp-p"}}}
             return {}
 
         with self._no_sleep(), patch(

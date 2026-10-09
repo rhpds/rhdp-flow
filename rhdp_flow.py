@@ -5428,8 +5428,6 @@ def _enrich_qa2_results_with_soundcheck(
     ``{"reachable": bool, "checked": int, "session_status": str}`` so callers can
     surface a degraded Soundcheck instead of reporting a silent pass.
     """
-    import urllib.parse
-
     summary = {"reachable": False, "checked": 0, "session_status": "unknown"}
     if not results:
         return summary
@@ -5473,48 +5471,57 @@ def _enrich_qa2_results_with_soundcheck(
     all_ids = list(dict.fromkeys(wid for _, _, wid in pairs))[:40]
     summary["checked"] = len(all_ids)
     base = _soundcheck_base_url()
-    session_id = ""
-    session_url = f"{base}/check?workshop={','.join(all_ids)}"
+    group_id = ""
+    group_url = f"{base}/check?workshop={','.join(all_ids)}"
     session_status = "unknown"
     kickoff_ok = False
 
     if on_progress:
         on_progress(90, f"Soundcheck: checking {len(all_ids)} workshop(s)")
 
-    # Full kickoff — same contract as the Admin Ops batch. Timeout is kept short
-    # (15 s) so an unreachable Soundcheck doesn't stall the QA job for a minute;
-    # the except block marks affected rows "unreachable" instead of blocking.
+    # Create a Soundcheck group so every result row gets a single shareable URL
+    # instead of one tab per workshop. Timeout kept short (15 s) so an
+    # unreachable Soundcheck doesn't stall the QA job.
     try:
-        kick = _http_json(
-            "GET",
-            f"{base}/api/check?workshop={urllib.parse.quote(','.join(all_ids))}"
-            f"&name={urllib.parse.quote(f'Flow QA3 Soundcheck — {len(all_ids)} workshop(s)')}",
+        grp = _http_json(
+            "POST",
+            f"{base}/api/groups",
+            body={
+                "name": f"Flow QA3 — {len(all_ids)} workshop(s)",
+                "workshop_guids": all_ids,
+            },
             timeout=15.0,
             extra_headers=_sc_auth_headers,
         )
-        kickoff_ok = True
-        session_id = str(kick.get("session_id") or "")
-        if session_id:
-            session_url = f"{base}/session/{session_id}"
+        group_id = str(grp.get("group_id") or "")
+        if group_id:
+            group_url = f"{base}/group/{group_id}"
+            _http_json(
+                "POST",
+                f"{base}/api/groups/{group_id}/run",
+                timeout=15.0,
+                extra_headers=_sc_auth_headers,
+            )
+            kickoff_ok = True
             for attempt in range(12):
                 if is_cancelled and is_cancelled():
-                    logger.info("QA3 Soundcheck cancelled during poll (session %s)", session_id)
+                    logger.info("QA3 Soundcheck cancelled during poll (group %s)", group_id)
                     break
-                detail = _http_json("GET", f"{base}/api/sessions/{session_id}", timeout=30.0, extra_headers=_sc_auth_headers)
-                session_status = str((detail.get("session") or {}).get("status") or "pending")
+                detail = _http_json("GET", f"{base}/api/groups/{group_id}", timeout=30.0, extra_headers=_sc_auth_headers)
+                session_status = str((detail.get("group") or {}).get("status") or "pending")
                 if on_progress:
                     on_progress(90, f"Soundcheck: {session_status} ({attempt + 1}/12)")
                 if session_status in ("completed", "failed"):
                     break
                 time.sleep(5.0)
             logger.info(
-                "QA3 Soundcheck session %s ended/poll-stop with status=%s",
-                session_id,
+                "QA3 Soundcheck group %s ended/poll-stop with status=%s",
+                group_id,
                 session_status,
             )
     except Exception as exc:
         logger.warning(
-            "QA3 Soundcheck kickoff/poll failed (%s) — falling back to check-status / deep-link",
+            "QA3 Soundcheck group kickoff/poll failed (%s) — falling back to check-status / deep-link",
             exc,
         )
 
@@ -5544,7 +5551,7 @@ def _enrich_qa2_results_with_soundcheck(
         for r in results:
             if ci_to_ids.get(r.get("ci") or ""):
                 r["showroom_status"] = "unreachable"
-                r["showroom_url"] = session_url
+                r["showroom_url"] = group_url
                 note = "Soundcheck unreachable"
                 issues = (r.get("issues") or "").strip()
                 r["issues"] = f"{issues}; {note}" if issues else note
@@ -5568,7 +5575,6 @@ def _enrich_qa2_results_with_soundcheck(
 
         worst = None
         worst_rank = 0
-        worst_sid = session_id
         for wid in ids:
             entry = statuses.get(wid) if isinstance(statuses.get(wid), dict) else None
             if not entry:
@@ -5578,14 +5584,13 @@ def _enrich_qa2_results_with_soundcheck(
             if rnk >= worst_rank:
                 worst_rank = rnk
                 worst = st
-                worst_sid = entry.get("session_id") or worst_sid
 
         if not worst:
             if session_status and session_status != "unknown":
                 worst = session_status
             elif has_showroom:
                 r["showroom_status"] = "pending"
-                r["showroom_url"] = session_url
+                r["showroom_url"] = group_url
                 continue
             else:
                 r.setdefault("showroom_status", "")
@@ -5599,7 +5604,7 @@ def _enrich_qa2_results_with_soundcheck(
             "pending": "pending",
         }.get(worst, worst)
         r["showroom_status"] = mapped
-        r["showroom_url"] = f"{base}/session/{worst_sid}" if worst_sid else session_url
+        r["showroom_url"] = group_url
         if mapped == "unhealthy":
             note = f"Soundcheck {worst}"
             issues = (r.get("issues") or "").strip()
