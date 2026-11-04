@@ -117,6 +117,7 @@ def get_catalog_namespace(ci: str, explicit_namespace: str | None = None) -> str
            - .event → babylon-catalog-event
            - .prod → babylon-catalog-prod
            - .dev → babylon-catalog-dev
+           - .test → babylon-catalog-test
         3. Default to babylon-catalog-prod for unknown suffixes
     """
     if explicit_namespace:
@@ -128,6 +129,8 @@ def get_catalog_namespace(ci: str, explicit_namespace: str | None = None) -> str
         return "babylon-catalog-prod"
     elif ci.endswith(".dev"):
         return "babylon-catalog-dev"
+    elif ci.endswith(".test"):
+        return "babylon-catalog-test"
     else:
         return "babylon-catalog-prod"
 
@@ -2591,7 +2594,7 @@ def get_catalog_item_num_users_limit(ci: str, config: RHDPConfig) -> dict | None
 
 def list_catalog_items(config: RHDPConfig) -> list[dict]:
     """
-    List CatalogItem resources from babylon-catalog-prod, babylon-catalog-event, and babylon-catalog-dev.
+    List CatalogItem resources from babylon-catalog-prod, babylon-catalog-event, babylon-catalog-dev, and babylon-catalog-test.
 
     Returns sorted list of dicts with keys: id, display_name, catalog_namespace,
     description, category, and a list of parameter summaries extracted from the spec.
@@ -2600,7 +2603,7 @@ def list_catalog_items(config: RHDPConfig) -> list[dict]:
     env = os.environ.copy()
     if config.kubeconfig_path:
         env["KUBECONFIG"] = config.kubeconfig_path
-    for ns in ("babylon-catalog-prod", "babylon-catalog-event", "babylon-catalog-dev"):
+    for ns in ("babylon-catalog-prod", "babylon-catalog-event", "babylon-catalog-dev", "babylon-catalog-test"):
         try:
             cmd = [
                 config.oc_command,
