@@ -1849,17 +1849,20 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
 
     schedules = _filter_schedules(body.ci_filter)
 
-    # Non-default targets (not Events) require an authenticated operator.
-    if body.target_cluster:
-        identity.require_picker_access(request, body.target_cluster)
+    # Resolve effective target: explicit selection or fall back to the default cluster (events).
+    effective_target = body.target_cluster or identity.DEFAULT_TARGET_CLUSTER
+
+    # Non-default targets require an authenticated operator.
+    if effective_target != identity.DEFAULT_TARGET_CLUSTER:
+        identity.require_picker_access(request, effective_target)
     # Validate the deploy-target cluster early so a bad target fails fast.
     try:
-        await asyncio.to_thread(cluster_targets.resolve_and_cleanup_check, body.target_cluster)
+        await asyncio.to_thread(cluster_targets.resolve_and_cleanup_check, effective_target)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
     def preflight():
-        config_check = _get_config(target_cluster=body.target_cluster)
+        config_check = _get_config(target_cluster=effective_target)
         try:
             ci_cache: dict[str, dict | None] = {}
             limit_errors: list[str] = []
@@ -1911,7 +1914,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 for entry in result["errors"]:
                     param_errors.append(f"{s.ci_name} ({s.ci}): {entry['message']}")
         finally:
-            cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path if body.target_cluster else None)
+            cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path if effective_target else None)
         if limit_errors:
             raise HTTPException(
                 400,
@@ -1944,7 +1947,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 enable_resource_pools=body.enable_resource_pools,
                 white_glove=body.white_glove,
                 redirect=body.redirect,
-                target_cluster=body.target_cluster,
+                target_cluster=effective_target,
             )
             # U3: Propagate showroom deploy settings to schedules
             for s in schedules:
@@ -2010,7 +2013,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 log_path=log_path,
             )
         finally:
-            if body.target_cluster and config is not None:
+            if effective_target and config is not None:
                 cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
             stop_log_capture(handler)
 
