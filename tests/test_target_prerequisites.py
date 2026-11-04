@@ -143,6 +143,10 @@ def test_slow_deploy_preflight_keeps_probe_responsive(monkeypatch, make_tenant_s
     monkeypatch.setattr(routes, "_schedules", [tenant])
     entered, release = threading.Event(), threading.Event()
     monkeypatch.setattr(routes, "_get_config", lambda **kw: SimpleNamespace(kubeconfig_path=None))
+    monkeypatch.setattr(routes.cluster_targets, "resolve_and_cleanup_check", lambda *a: None)
+    monkeypatch.setattr(routes, "validate_catalog_item_exists",
+                        lambda *a, **kw: (True, "babylon-catalog-prod", None, None, []))
+    monkeypatch.setattr(routes, "get_catalog_item_parameter_schemas", lambda *a, **kw: None)
     def limit(*args):
         entered.set()
         release.wait(3)
