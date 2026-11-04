@@ -602,12 +602,13 @@ export const UploadTab: React.FC<Props> = ({
     setSkippedCatalogSummary(null);
     setPoolCapacityWarnings([]);
     setPoolsNotFound([]);
+    const effectiveTarget = targetCluster || DEFAULT_TARGET_CLUSTER;
     const [nsRes, nuRes, cnRes, pcRes, pvRes] = await Promise.all([
-      api.validateNamespaces(),
-      api.validateNumUsers(),
-      api.validateCatalogNamespaces(),
+      api.validateNamespaces(effectiveTarget),
+      api.validateNumUsers(effectiveTarget),
+      api.validateCatalogNamespaces(effectiveTarget),
       api.validatePoolCapacity(),
-      api.validateParameters(),
+      api.validateParameters(effectiveTarget),
     ]);
     if (nsRes.missing.length) setMissingNamespaces(nsRes.missing);
     if (nuRes.violations.length) setNumUsersViolations(nuRes.violations);
@@ -1455,7 +1456,7 @@ export const UploadTab: React.FC<Props> = ({
       affected_count: n,
     });
     try {
-      const cnRes = await api.validateCatalogNamespaces();
+      const cnRes = await api.validateCatalogNamespaces(targetCluster || DEFAULT_TARGET_CLUSTER);
       setCatalogNamespaceMismatches(cnRes.mismatches || []);
       setCatalogNotFound(cnRes.not_found || []);
     } catch { /* non-fatal */ }
@@ -1517,7 +1518,7 @@ export const UploadTab: React.FC<Props> = ({
     try { await api.updateSchedules(updated); } catch { /* non-fatal */ }
     // Re-check so remaining real violations stay visible
     try {
-      const nuRes = await api.validateNumUsers();
+      const nuRes = await api.validateNumUsers(targetCluster || DEFAULT_TARGET_CLUSTER);
       setNumUsersViolations(nuRes.violations || []);
       setUsersNotInCatalog(nuRes.users_not_in_catalog || []);
       setUsersBlankCatalogDefault(nuRes.users_blank_catalog_default || []);
@@ -1567,7 +1568,7 @@ export const UploadTab: React.FC<Props> = ({
     setNumUsersViolations([]);
     try { await api.updateSchedules(updated); } catch { /* non-fatal */ }
     try {
-      const nuRes = await api.validateNumUsers();
+      const nuRes = await api.validateNumUsers(targetCluster || DEFAULT_TARGET_CLUSTER);
       setNumUsersViolations(nuRes.violations || []);
       setUsersNotInCatalog(nuRes.users_not_in_catalog || []);
       setUsersBlankCatalogDefault(nuRes.users_blank_catalog_default || []);
