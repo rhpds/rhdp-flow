@@ -399,7 +399,7 @@ export const UploadTab: React.FC<Props> = ({
 
   // Catalog namespace bulk override modal
   const [showCatalogOverrideModal, setShowCatalogOverrideModal] = useState(false);
-  const [catalogOverrideAction, setCatalogOverrideAction] = useState<'event' | 'prod' | 'dev' | 'clear' | null>(null);
+  const [catalogOverrideAction, setCatalogOverrideAction] = useState<'event' | 'prod' | 'dev' | 'test' | 'clear' | null>(null);
 
   // Fill missing dates modal
   const [showFillDatesModal, setShowFillDatesModal] = useState(false);
@@ -639,14 +639,15 @@ export const UploadTab: React.FC<Props> = ({
           let next = s;
           const main = mapping.get(s.ci);
           if (main) {
-            const suffix = main.endsWith('.event') ? 'event' : main.endsWith('.dev') ? 'dev' : 'prod';
+            const suffix = main.endsWith('.event') ? 'event' : main.endsWith('.dev') ? 'dev' : main.endsWith('.test') ? 'test' : 'prod';
             next = {
               ...next,
               ci: main,
               catalog_namespace:
                 suffix === 'event' ? 'babylon-catalog-event'
                   : suffix === 'dev' ? 'babylon-catalog-dev'
-                    : 'babylon-catalog-prod',
+                    : suffix === 'test' ? 'babylon-catalog-test'
+                      : 'babylon-catalog-prod',
             };
           }
           if (next.asset_cis) {
@@ -762,7 +763,7 @@ export const UploadTab: React.FC<Props> = ({
     });
   };
 
-  const handleCatalogOverride = (action: 'event' | 'prod' | 'dev' | 'clear') => {
+  const handleCatalogOverride = (action: 'event' | 'prod' | 'dev' | 'test' | 'clear') => {
     setCatalogOverrideAction(action);
     setShowCatalogOverrideModal(true);
   };
@@ -773,6 +774,7 @@ export const UploadTab: React.FC<Props> = ({
     const newValue = catalogOverrideAction === 'clear' ? '' :
                      catalogOverrideAction === 'event' ? 'babylon-catalog-event' :
                      catalogOverrideAction === 'prod' ? 'babylon-catalog-prod' :
+                     catalogOverrideAction === 'test' ? 'babylon-catalog-test' :
                      'babylon-catalog-dev';
 
     const updated = schedules.map(s => ({ ...s, catalog_namespace: newValue }));
@@ -3570,6 +3572,15 @@ export const UploadTab: React.FC<Props> = ({
                       </SplitItem>
                       <SplitItem>
                         <Button
+                          variant="secondary"
+                          onClick={() => handleCatalogOverride('test')}
+                          size="sm"
+                        >
+                          Force Test Catalog
+                        </Button>
+                      </SplitItem>
+                      <SplitItem>
+                        <Button
                           variant="tertiary"
                           onClick={() => handleCatalogOverride('clear')}
                           size="sm"
@@ -3937,6 +3948,7 @@ export const UploadTab: React.FC<Props> = ({
             const newValue = catalogOverrideAction === 'clear' ? 'Auto-detect' :
                            catalogOverrideAction === 'event' ? 'babylon-catalog-event' :
                            catalogOverrideAction === 'prod' ? 'babylon-catalog-prod' :
+                           catalogOverrideAction === 'test' ? 'babylon-catalog-test' :
                            'babylon-catalog-dev';
 
             // Count workshops by their auto-detected catalog
@@ -3944,6 +3956,7 @@ export const UploadTab: React.FC<Props> = ({
               const detected = s.ci.endsWith('.event') ? 'babylon-catalog-event' :
                              s.ci.endsWith('.prod') ? 'babylon-catalog-prod' :
                              s.ci.endsWith('.dev') ? 'babylon-catalog-dev' :
+                             s.ci.endsWith('.test') ? 'babylon-catalog-test' :
                              'babylon-catalog-prod';
               acc[detected] = (acc[detected] || 0) + 1;
               return acc;
@@ -3967,7 +3980,8 @@ export const UploadTab: React.FC<Props> = ({
                       <li><code>.event</code> suffix → <strong>babylon-catalog-event</strong></li>
                       <li><code>.prod</code> suffix → <strong>babylon-catalog-prod</strong></li>
                       <li><code>.dev</code> suffix → <strong>babylon-catalog-dev</strong></li>
-                      <li>No suffix → <strong>babylon-catalog-prod</strong> (default)</li>
+                      <li><code>.test</code> suffix → <strong>babylon-catalog-test</strong></li>
+                      <li>No recognized suffix → <strong>babylon-catalog-prod</strong> (default)</li>
                     </ul>
                     <p style={{ marginTop: 12 }}>Current auto-detection:</p>
                     <ul style={{ marginTop: 8 }}>
