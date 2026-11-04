@@ -2898,8 +2898,16 @@ _SCHEDULE_PARAM_VALUE_FIELDS = {
     "aws_region": "aws_regions",
 }
 # Parameters flow supplies itself (so a required-without-default param of this name is not
-# a "missing required" problem for the operator to fix).
-_FLOW_SUPPLIED_PARAMS = {"num_users", "aws_region"}
+# a "missing required" problem for the operator to fix). Keep in sync with
+# _provider_parameter_values(), which always sets purpose/start_timestamp/stop_timestamp
+# and conditionally sets num_users/aws_region.
+_FLOW_SUPPLIED_PARAMS = {
+    "num_users",
+    "aws_region",
+    "purpose",
+    "start_timestamp",
+    "stop_timestamp",
+}
 
 
 def _schedule_supplied_param_values(schedule: "WorkshopSchedule") -> dict[str, list[str]]:

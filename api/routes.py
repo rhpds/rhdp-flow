@@ -1913,9 +1913,9 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 for entry in result["errors"]:
                     param_errors.append(f"{s.ci_name} ({s.ci}): {entry['message']}")
         finally:
-            cluster_targets.cleanup_kubeconfig(
-                config_check.kubeconfig_path if effective_target != identity.DEFAULT_TARGET_CLUSTER else None
-            )
+            # effective_target is always set, so _get_config always built a temp
+            # kubeconfig — always clean it up or we leak a file per deploy.
+            cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path)
         if limit_errors:
             raise HTTPException(
                 400,
@@ -3071,11 +3071,14 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     if floor == "day" and not floor_date:
         raise HTTPException(400, "floor_date is required when floor=day (Ops Floor day pin).")
 
-    # Resolve the (optional) non-default target the same way _request_config
-    # does, but defer credential setup to the background task so the temp
-    # kubeconfig is not cleaned up when this request returns.
-    target = request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
-    if target:
+    # Resolve the effective target, but defer credential setup to the background
+    # task so the temp kubeconfig is not cleaned up when this request returns.
+    # Like deploy, QA falls back to the default cluster (events) when nothing is
+    # selected — catalog namespaces such as babylon-catalog-test only exist there.
+    requested = request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
+    target = requested or identity.DEFAULT_TARGET_CLUSTER
+    # Non-default targets (not Events) require an authenticated operator.
+    if target != identity.DEFAULT_TARGET_CLUSTER:
         identity.require_picker_access(request, target)
 
     # Support multiple namespaces for faster targeted QA
@@ -3112,10 +3115,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         handler, log_path = start_log_capture("qa", job.job_id)
         config = None
         try:
-            if target:
-                config = await asyncio.to_thread(_get_config, target_cluster=target)
-            else:
-                config = await asyncio.to_thread(_get_config)
+            config = await asyncio.to_thread(_get_config, target_cluster=target)
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.running,
@@ -3185,7 +3185,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 log_path=log_path,
             )
         finally:
-            if target and config is not None:
+            if config is not None:
                 cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
             stop_log_capture(handler)
 
