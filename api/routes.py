@@ -1918,9 +1918,10 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 f"num_users limit exceeded: {'; '.join(limit_errors)}"
             )
         if not_found_errors:
+            n = len(not_found_errors)
             raise HTTPException(
                 400,
-                f"Catalog items not found — cannot deploy: {'; '.join(not_found_errors)}"
+                f"Catalog items not found ({n} item{'s' if n != 1 else ''}) — cannot deploy: {'; '.join(not_found_errors)}"
             )
         if param_errors:
             raise HTTPException(
