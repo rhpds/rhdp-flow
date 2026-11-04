@@ -3138,6 +3138,7 @@ export const UploadTab: React.FC<Props> = ({
                           <FormSelectOption value="babylon-catalog-event" label="babylon-catalog-event" />
                           <FormSelectOption value="babylon-catalog-prod" label="babylon-catalog-prod" />
                           <FormSelectOption value="babylon-catalog-dev" label="babylon-catalog-dev" />
+                          <FormSelectOption value="babylon-catalog-test" label="babylon-catalog-test" />
                         </FormSelect>
                       </Td>
                       <Td dataLabel="Users">
