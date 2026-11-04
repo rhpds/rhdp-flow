@@ -241,6 +241,7 @@ export const UploadTab: React.FC<Props> = ({
 
   const [deploying, setDeploying] = useState(false);
   const [deployPaused, setDeployPaused] = useState(false);
+  const [deployPreflightErrors, setDeployPreflightErrors] = useState<string[] | null>(null);
   const [validating, setValidating] = useState(false);
   const [yamlDownloading, setYamlDownloading] = useState(false);
   const [rowEditsLocked, setRowEditsLocked] = useState(false);
@@ -1099,6 +1100,7 @@ export const UploadTab: React.FC<Props> = ({
     // Blocking issues are now shown in confirmation modal with disabled deploy button
     setDeploying(true);
     setDeployPaused(false);
+    setDeployPreflightErrors(null);
     setProgress(0);
     setProgressMsg('Starting...');
     setLogLines([]);
@@ -1178,7 +1180,15 @@ export const UploadTab: React.FC<Props> = ({
       };
     } catch (e) {
       setDeploying(false);
-      showToast(`Deploy failed: ${e}`, 'danger');
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith('Catalog items not found')) {
+        // Extract the per-item list after the colon separator
+        const colonIdx = msg.indexOf(': ');
+        const itemsRaw = colonIdx >= 0 ? msg.slice(colonIdx + 2) : msg;
+        setDeployPreflightErrors(itemsRaw.split('; ').filter(Boolean));
+      } else {
+        showToast(`Deploy failed: ${msg}`, 'danger');
+      }
     }
   };
 
@@ -3683,6 +3693,23 @@ export const UploadTab: React.FC<Props> = ({
             )}
           </EmptyStateBody>
         </EmptyState>
+      )}
+
+      {/* Deploy preflight errors (catalog items not found) */}
+      {deployPreflightErrors && (
+        <Alert
+          variant="danger"
+          isInline
+          title={`${deployPreflightErrors.length} catalog item${deployPreflightErrors.length !== 1 ? 's' : ''} not found — deploy blocked`}
+          style={{ marginBottom: 16 }}
+          actionClose={<button aria-label="Close" onClick={() => setDeployPreflightErrors(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16 }}>✕</button>}
+        >
+          <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
+            {deployPreflightErrors.map((item, i) => (
+              <li key={i} style={{ marginBottom: 4 }}>{item}</li>
+            ))}
+          </ul>
+        </Alert>
       )}
 
       {/* Progress + Cancel/Pause controls */}

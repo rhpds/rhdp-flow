@@ -3124,7 +3124,7 @@ def _catalog_name_index(config: RHDPConfig) -> dict[str, list[str]]:
     env = os.environ.copy()
     if config.kubeconfig_path:
         env["KUBECONFIG"] = config.kubeconfig_path
-    for ns in ("babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev"):
+    for ns in ("babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev", "babylon-catalog-test"):
         try:
             cmd = [config.oc_command, "get", "catalogitem", "-n", ns, "-o", "json"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, env=env)
@@ -3203,7 +3203,7 @@ def validate_catalog_item_exists(
         return _cache_and_return((True, expected_namespace, None, None, []))
 
     # Exact name in other catalog namespaces (same CI string — namespace redirect only)
-    for ns in ("babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev"):
+    for ns in ("babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev", "babylon-catalog-test"):
         if ns == expected_namespace:
             continue
         if ns in _ns_for(ci):
@@ -3215,10 +3215,10 @@ def validate_catalog_item_exists(
 
     # Bare CI, or wrong env suffix (e.g. .event when only .prod exists): collect suffix hits.
     # Prefer .event when published (big-event default). Else auto .prod when present.
-    has_env_suffix = ci.endswith((".prod", ".event", ".dev"))
+    has_env_suffix = ci.endswith((".prod", ".event", ".dev", ".test"))
     base_ci = ci
     if has_env_suffix:
-        for _sfx in (".event", ".prod", ".dev"):
+        for _sfx in (".event", ".prod", ".dev", ".test"):
             if ci.endswith(_sfx):
                 base_ci = ci[: -len(_sfx)]
                 break
@@ -3232,6 +3232,7 @@ def validate_catalog_item_exists(
             (".event", "babylon-catalog-event"),
             (".prod", "babylon-catalog-prod"),
             (".dev", "babylon-catalog-dev"),
+            (".test", "babylon-catalog-test"),
         ):
             alt = f"{base_ci}{suffix}"
             if alt == ci or alt in seen_alts:
@@ -3295,12 +3296,12 @@ def validate_catalog_item_exists(
         )
     else:
         searched = []
-        for ns in (expected_namespace, "babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev"):
+        for ns in (expected_namespace, "babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev", "babylon-catalog-test"):
             if ns and ns not in searched:
                 searched.append(ns)
         suggestion = (
             f"Item '{ci}' not found (searched: {', '.join(searched)}). "
-            f"Check the CI name — many items need a .prod or .event suffix."
+            f"Check the CI name — many items need a .event, .prod, .dev, or .test suffix."
         )
 
     return _cache_and_return((False, None, suggestion, None, []))
