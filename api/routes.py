@@ -523,11 +523,10 @@ def _get_config(
 def _request_config(request: Request):
     """Resolve a request's target without changing process-wide credentials."""
     target = request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
-    effective_target = target or identity.DEFAULT_TARGET_CLUSTER
-    if effective_target != identity.DEFAULT_TARGET_CLUSTER:
-        identity.require_picker_access(request, effective_target)
+    if target:
+        identity.require_picker_access(request, target)
     try:
-        config = _get_config(target_cluster=effective_target)
+        config = _get_config(target_cluster=target) if target else _get_config()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except subprocess.TimeoutExpired as exc:
@@ -535,9 +534,8 @@ def _request_config(request: Request):
     try:
         yield config
     finally:
-        cluster_targets.cleanup_kubeconfig(
-            config.kubeconfig_path if effective_target != identity.DEFAULT_TARGET_CLUSTER else None
-        )
+        if target:
+            cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
 
 
 def _config_env(config: RHDPConfig) -> dict[str, str]:
