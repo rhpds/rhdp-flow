@@ -3515,7 +3515,7 @@ export const UploadTab: React.FC<Props> = ({
                     </div>
                     <div style={{ fontSize: '0.85rem', color: 'var(--pf-v6-global--Color--200)', marginBottom: 12 }}>
                       <InfoCircleIcon style={{ marginRight: 4 }} />
-                      Auto-detected from CI suffix (.event → event, .prod → prod, .dev → dev, none → prod).
+                      Auto-detected from CI suffix (.event → event, .prod → prod, .dev → dev, .test → test, none → prod).
                       Override for all workshops if needed.
                     </div>
                     {(() => {
@@ -3523,6 +3523,7 @@ export const UploadTab: React.FC<Props> = ({
                         const detected = s.ci.endsWith('.event') ? 'babylon-catalog-event' :
                                        s.ci.endsWith('.prod') ? 'babylon-catalog-prod' :
                                        s.ci.endsWith('.dev') ? 'babylon-catalog-dev' :
+                                       s.ci.endsWith('.test') ? 'babylon-catalog-test' :
                                        'babylon-catalog-prod';
                         acc[detected] = (acc[detected] || 0) + 1;
                         return acc;
