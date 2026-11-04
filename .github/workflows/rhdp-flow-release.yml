@@ -5,6 +5,7 @@ on:
     workflows: ["RHDP-Flow CI"]
     types: [completed]
     branches: [main]
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -14,21 +15,28 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      !contains(github.event.workflow_run.head_commit.message, '[skip ci]')
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        !contains(github.event.workflow_run.head_commit.message, '[skip ci]')
+      )
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
           fetch-depth: 0
           token: ${{ github.token }}
+
+      - name: Get commit message
+        id: commitmsg
+        run: echo "msg=$(git log -1 --format=%s)" >> "$GITHUB_OUTPUT"
 
       - name: Detect bump type
         id: bump
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message }}
+          COMMIT_MSG: ${{ steps.commitmsg.outputs.msg }}
         run: |
           BUMP="patch"
           LABEL_MATCH=""
@@ -97,7 +105,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         id: title
         env:
-          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message }}
+          COMMIT_MSG: ${{ steps.commitmsg.outputs.msg }}
         run: |
           SUBJECT="${COMMIT_MSG%%$'\n'*}"
           echo "name=RHDP-Flow v${{ steps.version.outputs.new }} — ${SUBJECT}" >> "$GITHUB_OUTPUT"
