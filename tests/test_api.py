@@ -1613,13 +1613,15 @@ def test_validate_num_users_blank_users_catalog_default_advisory(mock_limit, cli
 
 def test_deploy_blocked_when_limit_exceeded(monkeypatch, uploaded_client):
     """Live deploy returns 400 when users exceed the catalog limit."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(routes.cluster_targets, "resolve_and_cleanup_check", lambda *a: None)
+    monkeypatch.setattr(routes, "_get_config", lambda **kw: SimpleNamespace(kubeconfig_path=None))
     monkeypatch.setattr(routes, "get_catalog_item_num_users_limit",
                         lambda *a, **kw: {"has_num_users": True, "maximum": 10, "minimum": 2, "default": 2})
     monkeypatch.setattr(routes, "validate_catalog_item_exists",
                         lambda *a, **kw: (True, "babylon-catalog-prod", None, None, []))
     monkeypatch.setattr(routes, "get_catalog_item_parameter_schemas",
                         lambda *a, **kw: None)
-    monkeypatch.setattr(routes.cluster_targets, "resolve_and_cleanup_check", lambda *a: None)
     resp = uploaded_client.post("/api/deploy", json={"dry_run": False})
     assert resp.status_code == 400
     assert "num_users limit exceeded" in resp.json()["detail"]
