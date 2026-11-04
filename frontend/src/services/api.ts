@@ -243,16 +243,16 @@ export const api = {
       { method: 'POST', body: '{}' },
     ),
   getSchedules: () => cachedRequest<WorkshopSchedule[]>('/schedules'),
-  validateNamespaces: () =>
-    request<{ namespaces: Record<string, boolean>; missing: string[] }>('/schedules/validate-namespaces', { method: 'POST', body: '{}' }),
-  validateNumUsers: () =>
-    request<NumUsersValidationResponse>('/schedules/validate-num-users', { method: 'POST', body: '{}' }),
-  validateParameters: () =>
-    request<import('../types').ParameterValidationResponse>('/schedules/validate-parameters', { method: 'POST', body: '{}' }),
-  validateCatalogNamespaces: () =>
-    request<import('../types').CatalogNamespaceValidationResponse>('/schedules/validate-catalog-namespaces', { method: 'POST', body: '{}' }),
-  validateClusterTenant: () =>
-    request<any>('/schedules/validate-cluster-tenant', { method: 'POST', body: '{}' }),
+  validateNamespaces: (targetCluster?: string | null) =>
+    request<{ namespaces: Record<string, boolean>; missing: string[] }>(`/schedules/validate-namespaces${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  validateNumUsers: (targetCluster?: string | null) =>
+    request<NumUsersValidationResponse>(`/schedules/validate-num-users${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  validateParameters: (targetCluster?: string | null) =>
+    request<import('../types').ParameterValidationResponse>(`/schedules/validate-parameters${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  validateCatalogNamespaces: (targetCluster?: string | null) =>
+    request<import('../types').CatalogNamespaceValidationResponse>(`/schedules/validate-catalog-namespaces${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  validateClusterTenant: (targetCluster?: string | null) =>
+    request<any>(`/schedules/validate-cluster-tenant${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
 
   getClusterNeeds: (targetCluster?: string | null) =>
     request<{
