@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="RHDP-Flow API",
     description="Web API for Red Hat Demo Platform Workshop Automation. Authors: Josh Disraeli, Billy Bethell.",
-    version="1.4.17",
+    version="1.4.18",
     lifespan=lifespan,
 )
 
