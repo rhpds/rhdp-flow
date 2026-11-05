@@ -520,11 +520,25 @@ def _get_config(
     return config
 
 
+def _requested_target(request: Request) -> str | None:
+    """The target cluster the caller explicitly asked for (header or query), if any."""
+    return request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
+
+
+def _resolve_target(request: Request, requested: str | None) -> str | None:
+    """Explicit target, else the default (Events) when configured; enforce picker access.
+
+    Blocking (may shell out to ``oc`` once per cache TTL) — call via
+    ``asyncio.to_thread`` from async routes.
+    """
+    target = identity.effective_target(requested)
+    identity.require_picker_access(request, target)
+    return target
+
+
 def _request_config(request: Request):
     """Resolve a request's target without changing process-wide credentials."""
-    target = request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
-    if target:
-        identity.require_picker_access(request, target)
+    target = _resolve_target(request, _requested_target(request))
     try:
         config = _get_config(target_cluster=target) if target else _get_config()
     except ValueError as exc:
@@ -534,8 +548,8 @@ def _request_config(request: Request):
     try:
         yield config
     finally:
-        if target:
-            cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
+        # Always safe: cleanup_kubeconfig ignores None (in-cluster config).
+        cluster_targets.cleanup_kubeconfig(config.kubeconfig_path if target else None)
 
 
 def _config_env(config: RHDPConfig) -> dict[str, str]:
@@ -1849,11 +1863,9 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
 
     schedules = _filter_schedules(body.ci_filter)
 
-    # Resolve effective target: explicit selection or fall back to the default cluster (events).
-    effective_target = body.target_cluster or identity.DEFAULT_TARGET_CLUSTER
-    # Non-default targets (not Events) require an authenticated operator.
-    if effective_target != identity.DEFAULT_TARGET_CLUSTER:
-        identity.require_picker_access(request, effective_target)
+    # Explicit selection, else the default cluster (Events) when configured.
+    # Non-default targets require an authenticated operator.
+    effective_target = await asyncio.to_thread(_resolve_target, request, body.target_cluster)
     # Validate the deploy-target cluster early so a bad target fails fast.
     try:
         await asyncio.to_thread(cluster_targets.resolve_and_cleanup_check, effective_target)
@@ -1913,9 +1925,10 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 for entry in result["errors"]:
                     param_errors.append(f"{s.ci_name} ({s.ci}): {entry['message']}")
         finally:
-            # effective_target is always set, so _get_config always built a temp
-            # kubeconfig — always clean it up or we leak a file per deploy.
-            cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path)
+            # A resolved target always gets its own temp kubeconfig — clean it up
+            # or we leak a file per deploy. With no target the path is the
+            # caller's own KUBECONFIG, which must never be deleted.
+            cluster_targets.cleanup_kubeconfig(config_check.kubeconfig_path if effective_target else None)
         if limit_errors:
             raise HTTPException(
                 400,
@@ -2046,8 +2059,7 @@ async def deploy_session(
     best-effort (a concurrent human upload may overwrite the displayed set).
     Per-workshop results are also on the job (``GET /api/deploy/status/{id}``).
     """
-    if target_cluster:
-        identity.require_picker_access(request, target_cluster)
+    target_cluster = await asyncio.to_thread(_resolve_target, request, target_cluster)
     raw = await file.read()
     if len(raw) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(413, "File exceeds 10 MB size limit")
@@ -2153,8 +2165,7 @@ def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key
     if not _schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
-    if body.target_cluster:
-        identity.require_picker_access(request, body.target_cluster)
+    target = _resolve_target(request, body.target_cluster)
     schedules = _filter_schedules(body.ci_filter)
     try:
         config = _get_config(
@@ -2163,7 +2174,7 @@ def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key
             enable_resource_pools=body.enable_resource_pools,
             white_glove=body.white_glove,
             redirect=body.redirect,
-            target_cluster=body.target_cluster,
+            target_cluster=target,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -2223,7 +2234,7 @@ def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key
         _save_results(results)
         return [_result_to_response(r) for r in results]
     finally:
-        if body.target_cluster:
+        if target:
             cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
         stop_log_capture(handler)
 
@@ -2239,8 +2250,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
     if not _schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
-    if body.target_cluster:
-        identity.require_picker_access(request, body.target_cluster)
+    target = _resolve_target(request, body.target_cluster)
     schedules = _filter_schedules(body.ci_filter)
     tmpdir = tempfile.mkdtemp(prefix="rhdp-dryrun-yaml-")
     config = None
@@ -2252,7 +2262,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
                 enable_resource_pools=body.enable_resource_pools,
                 white_glove=body.white_glove,
                 redirect=body.redirect,
-                target_cluster=body.target_cluster,
+                target_cluster=target,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
@@ -2287,7 +2297,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
         parts = [p.read_text(encoding="utf-8").strip() for p in yaml_paths]
         combined = "\n---\n".join(parts)
     finally:
-        if body.target_cluster and config is not None:
+        if target and config is not None:
             cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -2520,9 +2530,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
     if not matching:
         raise HTTPException(404, f"No schedules match the provided CI names: {body.ci_names}")
 
-    target = request.headers.get("X-RHDP-Target-Cluster")
-    if target:
-        identity.require_picker_access(request, target)
+    target = await asyncio.to_thread(_resolve_target, request, _requested_target(request))
 
     # Pre-deploy num_users limit check (live deploys only) - same as main deploy
     def preflight():
@@ -3075,11 +3083,8 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     # task so the temp kubeconfig is not cleaned up when this request returns.
     # Like deploy, QA falls back to the default cluster (events) when nothing is
     # selected — catalog namespaces such as babylon-catalog-test only exist there.
-    requested = request.headers.get("X-RHDP-Target-Cluster") or request.query_params.get("target_cluster")
-    target = requested or identity.DEFAULT_TARGET_CLUSTER
-    # Non-default targets (not Events) require an authenticated operator.
-    if target != identity.DEFAULT_TARGET_CLUSTER:
-        identity.require_picker_access(request, target)
+    # Non-default targets require an authenticated operator.
+    target = await asyncio.to_thread(_resolve_target, request, _requested_target(request))
 
     # Support multiple namespaces for faster targeted QA
     if body.namespaces:
@@ -3185,7 +3190,9 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 log_path=log_path,
             )
         finally:
-            if config is not None:
+            # Only a resolved target has a temp kubeconfig; with no target the
+            # path is the caller's own KUBECONFIG and must not be deleted.
+            if target and config is not None:
                 cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
             stop_log_capture(handler)
 

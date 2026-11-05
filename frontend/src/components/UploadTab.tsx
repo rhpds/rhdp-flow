@@ -3444,7 +3444,7 @@ export const UploadTab: React.FC<Props> = ({
                         <FormSelect
                           id="target-cluster-select"
                           aria-label="Deploy target cluster"
-                          value={targetCluster}
+                          value={targetCluster || DEFAULT_TARGET_CLUSTER}
                           onChange={(_e, value) => {
                             selectTargetCluster(value);
                             setTargetCluster(value);
@@ -3465,14 +3465,11 @@ export const UploadTab: React.FC<Props> = ({
                             setPoolLookupData({});
                             setAllPools([]);
                             setShowPoolCreateModal(false);
-                            const label = value === ''
-                              ? 'This cluster (infra01)'
-                              : (deployClusters.find((c) => c.key === value)?.display_name || value);
+                            const label = deployClusters.find((c) => c.key === value)?.display_name || value;
                             showToast(`Deploy target: ${label}. Check prerequisites before deploying.`, 'info');
                           }}
                           style={{ width: 'auto', minWidth: 180 }}
                         >
-                          <FormSelectOption value="" label="This cluster (infra01) — Flow host only" />
                           {deployClusters.map((c) => (
                             <FormSelectOption
                               key={c.key}

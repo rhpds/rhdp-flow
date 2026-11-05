@@ -28,6 +28,26 @@ DEFAULT_TARGET_CLUSTER = os.environ.get("RHDP_DEFAULT_TARGET_CLUSTER", "events")
 _OPERATOR_EMAILS = "jdisrael@redhat.com,bbethell@redhat.com,prutledg@redhat.com"
 
 
+def effective_target(requested: str | None) -> str | None:
+    """Resolve the cluster a request should run against.
+
+    An explicit selection always wins. With no selection, use the default
+    target (Events / us-west-2) whenever its ``cluster-<key>`` Secret exists —
+    Flow's own cluster (infra01) has no Babylon catalog namespaces, so falling
+    back to it silently breaks catalog lookups, validation, deploy and QA.
+    If the default target is not configured (CI, local dev), return ``None`` so
+    callers keep using the in-cluster / KUBECONFIG credentials.
+    """
+    requested = (requested or "").strip()
+    if requested:
+        return requested
+    from api import cluster_targets  # local import: keep identity import-light
+
+    if cluster_targets.is_configured(DEFAULT_TARGET_CLUSTER):
+        return DEFAULT_TARGET_CLUSTER
+    return None
+
+
 def _allowed_emails() -> set[str] | None:
     """Return the non-default-target allowlist, or None if any authenticated user may pick."""
     raw = os.environ.get("DEPLOY_PICKER_ALLOWED_EMAILS", "*").strip()

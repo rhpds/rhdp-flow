@@ -24,6 +24,21 @@ from rhdp_flow import (
 
 
 @pytest.fixture(autouse=True)
+def _default_target_not_configured(monkeypatch):
+    """Keep target resolution hermetic: no ``cluster-<default>`` Secret exists.
+
+    ``identity.effective_target`` falls back to the default cluster (Events)
+    only when its Secret is found via ``oc``. Without this, a developer whose
+    local ``oc`` is logged into the real cluster would hit live credentials
+    in tests. Tests that exercise the default-target path override this.
+    """
+    from api import cluster_targets
+
+    cluster_targets._reset_configured_cache()
+    monkeypatch.setattr(cluster_targets, "is_configured", lambda target: False)
+
+
+@pytest.fixture(autouse=True)
 def _drain_background_jobs():
     """Drain in-flight background jobs (QA/deploy) after every test, suite-wide.
 

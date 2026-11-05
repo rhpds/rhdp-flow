@@ -126,7 +126,8 @@ describe('UploadTab', () => {
     expect(picker).toBeInTheDocument();
     expect(screen.getByText('Events (us-west-2) (default)')).toBeInTheDocument();
     expect(screen.getByText('Prod (us-east-1)')).toBeInTheDocument();
-    expect(screen.getByText('This cluster (infra01) — Flow host only')).toBeInTheDocument();
+    // infra01 hosts Flow only (no Babylon) — it is not offered as a deploy target.
+    expect(screen.queryByText(/This cluster \(infra01\)/)).not.toBeInTheDocument();
     await waitFor(() => expect(picker).toHaveValue('events'));
   });
 

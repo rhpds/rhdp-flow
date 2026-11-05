@@ -27,6 +27,8 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,42 @@ def list_target_clusters() -> list[dict[str, str]]:
         display = _b64(data.get("display-name")) or key
         clusters.append({"key": key, "display_name": display})
     return sorted(clusters, key=lambda c: c["key"])
+
+
+# How long a "does cluster-<key> exist?" answer is trusted before re-checking.
+_CONFIGURED_TTL_SECONDS = 60.0
+_configured_cache: dict[str, tuple[float, bool]] = {}
+_configured_lock = threading.Lock()
+
+
+def is_configured(target_cluster: str | None) -> bool:
+    """True if a ``cluster-<target>`` Secret exists in the app namespace.
+
+    Cached for ``_CONFIGURED_TTL_SECONDS`` so it is cheap to call per request.
+    Never raises: a missing ``oc`` binary (CI, local dev without a cluster),
+    a timeout, or a lookup error all mean "not configured", so callers fall
+    back to the in-cluster / KUBECONFIG credentials exactly as before.
+    """
+    if not target_cluster:
+        return False
+    now = time.monotonic()
+    with _configured_lock:
+        hit = _configured_cache.get(target_cluster)
+        if hit and now - hit[0] < _CONFIGURED_TTL_SECONDS:
+            return hit[1]
+    try:
+        ok = _oc(["get", "secret", f"cluster-{target_cluster}", "-n", _NS, "-o", "name"]).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    with _configured_lock:
+        _configured_cache[target_cluster] = (now, ok)
+    return ok
+
+
+def _reset_configured_cache() -> None:
+    """Test hook: forget cached ``is_configured`` answers."""
+    with _configured_lock:
+        _configured_cache.clear()
 
 
 def _build_kubeconfig(server: str, token: str, ca: str | None) -> str:
