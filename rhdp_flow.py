@@ -1412,6 +1412,23 @@ def dry_run_validate_schedules(
                     f"Instances={schedule.instances or 1} → WorkshopProvision.count"
                 )
 
+            # Validate num_users is within the catalog item's schema bounds.
+            if ci_expects_num_users is True and has_users:
+                limits = get_catalog_item_num_users_limit(schedule.ci, config)
+                if limits:
+                    min_u = limits.get("minimum")
+                    max_u = limits.get("maximum")
+                    if min_u is not None and schedule.users < min_u:
+                        logger.warning(
+                            f"  ⚠️  {schedule.ci_name}: Users={schedule.users} is below the schema "
+                            f"minimum of {min_u} — Babylon will reject this order"
+                        )
+                    if max_u is not None and schedule.users > max_u:
+                        logger.warning(
+                            f"  ⚠️  {schedule.ci_name}: Users={schedule.users} exceeds the schema "
+                            f"maximum of {max_u} — Babylon will reject this order"
+                        )
+
         if not schedule.is_multi_asset:
             continue
         # Multi-asset: list assets and num_users / password
