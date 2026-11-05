@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -3164,6 +3164,33 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                     _qa_log_path = log_path
                     _qa_last_scope = coverage
             _save_qa_results()
+            # Push QA1 (catalog check) results to Labagator to patch the Confluence
+            # ops runbook for this event's floor day. Fail-open — QA is primary.
+            if qa_type in ("1", "all") and not jobs.is_cancel_requested(job.job_id) and floor_date:
+                try:
+                    ns_list = list(namespaces)
+                    push_ns = ns_list[0] if len(ns_list) == 1 else ""
+                    if push_ns:
+                        qa1_rows = [r for r in all_results if r.ci_name]
+                        labagator_client.push_qa1_status(
+                            namespace=push_ns,
+                            floor_date=floor_date,
+                            passed=sum(1 for r in qa1_rows if r.status == "pass"),
+                            failed=sum(1 for r in qa1_rows if r.status != "pass"),
+                            not_run=0,
+                            results=[
+                                {
+                                    "ci_name": r.ci_name,
+                                    "ci": r.ci,
+                                    "status": r.status,
+                                    "issues": r.issues or "",
+                                }
+                                for r in qa1_rows
+                            ],
+                            run_at=datetime.now(UTC).isoformat(),
+                        )
+                except Exception:
+                    pass  # never let Confluence update block QA job completion
             if jobs.is_cancel_requested(job.job_id):
                 jobs.update_job(
                     job.job_id,
