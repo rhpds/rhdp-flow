@@ -1,18 +1,20 @@
-"""HTTP client for Labagator's read-only session/export endpoints.
+"""HTTP client for Labagator session/export endpoints.
 
 Flow and Labagator run in the same OpenShift cluster. Flow calls
 Labagator's in-cluster Service directly for read-only data (events list,
-deploy-handoff CSV export). Writes back to Labagator are out of scope —
-Labagator's write endpoints require OAuth-proxy-forwarded auth headers
-that a direct pod-to-pod call does not have.
+deploy-handoff CSV export) and for internal write-back operations that
+use a shared API key instead of OAuth proxy auth (e.g. QA1 status push).
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 LABAGATOR_BASE_URL = os.environ.get(
     "LABAGATOR_BASE_URL", "http://labagator-backend.labagator-dev.svc.cluster.local:8080"
@@ -114,6 +116,45 @@ def get_deploy_handoff_csv(
     if resp.status_code != 200:
         raise LabagatorError(f"Labagator returned {resp.status_code}: {resp.text[:200]}")
     return resp.text
+
+
+def push_qa1_status(
+    *,
+    namespace: str,
+    floor_date: str,
+    passed: int,
+    failed: int,
+    not_run: int,
+    results: list[dict],
+    run_at: str,
+) -> None:
+    """Push QA1 (catalog check) results to Labagator to patch the Confluence ops runbook.
+
+    Requires ``LABAGATOR_INTERNAL_API_KEY`` env var to be set on both sides.
+    Fails silently — QA results are primary; Confluence update is best-effort.
+    """
+    api_key = os.environ.get("LABAGATOR_INTERNAL_API_KEY", "").strip()
+    if not api_key or not namespace or not floor_date:
+        return
+    try:
+        resp = requests.post(
+            f"{LABAGATOR_BASE_URL}{_API_PREFIX}/exports/internal/qa1-status",
+            json={
+                "namespace": namespace,
+                "floor_date": floor_date,
+                "passed": passed,
+                "failed": failed,
+                "not_run": not_run,
+                "results": results,
+                "run_at": run_at,
+            },
+            headers={"X-Internal-Api-Key": api_key},
+            timeout=_TIMEOUT_SECONDS,
+        )
+        if resp.status_code not in (200, 201):
+            logger.warning("QA1 status push to Labagator returned %s: %s", resp.status_code, resp.text[:200])
+    except requests.RequestException as exc:
+        logger.warning("QA1 status push to Labagator failed: %s", exc)
 
 
 def _parse_date(value: str) -> date:

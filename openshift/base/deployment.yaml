@@ -30,6 +30,11 @@ spec:
             - configMapRef:
                 name: rhdp-scheduler-config
             - secretRef:
+                # Keys loaded from rhdp-flow-api Secret (create/patch with oc set data):
+                #   LABAGATOR_BASE_URL       — in-cluster Labagator service URL
+                #   LABAGATOR_INTERNAL_API_KEY — shared secret for QA1 Confluence write-back;
+                #                               must match internal_api_key in Labagator's
+                #                               labagator-flow Secret (ansible/vars/*.yml)
                 name: rhdp-flow-api
           env:
             - name: KUBECONFIG
