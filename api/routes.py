@@ -2475,6 +2475,22 @@ def delete_deploy_results(body: DeleteResultsRequest, _key=Depends(verify_api_ke
     return {"deleted": deleted, "remaining": len(_deployment_results)}
 
 
+@router.post("/deploy/results/clear")
+def clear_deploy_results(_key=Depends(verify_api_key)):
+    """Remove all deployment result rows from the dashboard view.
+
+    Clears the in-memory results list and the persisted snapshot.
+    This is a view-only cleanup — it does NOT undeploy or destroy anything on the
+    cluster.
+    """
+    global _deployment_results
+    with _state_lock:
+        cleared = len(_deployment_results)
+        _deployment_results = []
+        _save_results(_deployment_results)
+    return {"cleared": cleared, "remaining": 0}
+
+
 @router.post("/deploy/preview")
 def deploy_preview(body: DeployRequest = DeployRequest(), _key=Depends(verify_api_key)):  # type: ignore
     """Preview the deployment plan, including multi-region user splits.
