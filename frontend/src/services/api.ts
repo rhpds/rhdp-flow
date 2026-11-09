@@ -389,6 +389,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ items }),
     }),
+  clearResults: () =>
+    request<{ cleared: number; remaining: number }>('/deploy/results/clear', { method: 'POST', body: '{}' }),
 
   // Operations
   lock: (body: LockRequest) =>

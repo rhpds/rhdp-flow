@@ -167,6 +167,7 @@ export const DeploymentsTab: React.FC<Props> = ({
   const [retrying, setRetrying] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [overridesExpanded, setOverridesExpanded] = useState(false);
 
   // Persist search and filter to sessionStorage
@@ -256,6 +257,22 @@ export const DeploymentsTab: React.FC<Props> = ({
       showToast(`Refresh failed: ${e}`, 'danger');
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (results.length === 0) return;
+    if (!window.confirm(`Remove all ${results.length} deployment result(s) from the dashboard?\n\nThis only clears the display — it does NOT destroy any deployments.`)) return;
+    setClearing(true);
+    try {
+      const r = await api.clearResults();
+      setResults([]);
+      clearApiCache();
+      showToast(`Cleared ${r.cleared} deployment result(s)`, 'success');
+    } catch (e) {
+      showToast(`Clear failed: ${e}`, 'danger');
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -497,6 +514,18 @@ export const DeploymentsTab: React.FC<Props> = ({
         <SplitItem isFilled />
         <SplitItem>
           <Button variant="secondary" onClick={handleRefresh} isLoading={refreshing} isDisabled={refreshing}>Refresh</Button>
+        </SplitItem>
+        <SplitItem>
+          <Tooltip content="Remove all deployment results from the dashboard (does not destroy deployments)">
+            <Button
+              variant="danger"
+              onClick={handleClearAll}
+              isLoading={clearing}
+              isDisabled={clearing || results.length === 0}
+            >
+              Clear Deployments
+            </Button>
+          </Tooltip>
         </SplitItem>
         <SplitItem>
           <Button
