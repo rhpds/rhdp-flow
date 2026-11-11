@@ -5532,19 +5532,15 @@ def _enrich_qa2_results_with_soundcheck(
                 extra_headers=_sc_auth_headers,
             )
             kickoff_ok = True
-            for attempt in range(12):
-                if is_cancelled and is_cancelled():
-                    logger.info("QA3 Soundcheck cancelled during poll (group %s)", group_id)
-                    break
-                detail = _http_json("GET", f"{base}/api/groups/{group_id}", timeout=30.0, extra_headers=_sc_auth_headers)
-                session_status = str((detail.get("group") or {}).get("status") or "pending")
-                if on_progress:
-                    on_progress(90, f"Soundcheck: {session_status} ({attempt + 1}/12)")
-                if session_status in ("completed", "failed"):
-                    break
-                time.sleep(5.0)
+            session_status = _stream_soundcheck_group_sse(
+                base,
+                group_id,
+                _sc_auth_headers,
+                is_cancelled=is_cancelled,
+                on_progress=on_progress,
+            )
             logger.info(
-                "QA3 Soundcheck group %s ended/poll-stop with status=%s",
+                "QA3 Soundcheck group %s stream ended with status=%s",
                 group_id,
                 session_status,
             )
@@ -5799,6 +5795,66 @@ def resolve_admin_ops_url(namespace: str | None = None) -> str:
     if "{namespace}" in base and ns:
         return base.replace("{namespace}", ns)
     return base
+
+
+def _stream_soundcheck_group_sse(
+    base: str,
+    group_id: str,
+    extra_headers: dict | None,
+    *,
+    is_cancelled=None,
+    on_progress=None,
+    socket_timeout: float = 90.0,
+) -> str:
+    """Stream GET /api/groups/{id}/stream until group_complete or EOF.
+
+    Returns the final group status string ('completed', 'failed', etc.).
+    Falls back to 'unknown' on any connection error so the caller can still
+    use the check-status DB lookup to surface per-workshop results.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"{base}/api/groups/{group_id}/stream"
+    headers = {"Accept": "text/event-stream", "Cache-Control": "no-cache"}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    event_name = ""
+    try:
+        with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
+            while True:
+                if is_cancelled and is_cancelled():
+                    logger.info("QA3 Soundcheck SSE cancelled (group %s)", group_id)
+                    return "cancelled"
+                try:
+                    raw_line = resp.readline()
+                except TimeoutError:
+                    # Server is quiet but still alive — just keep waiting.
+                    continue
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line.startswith("event:"):
+                    event_name = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data_str = line[len("data:"):].strip()
+                    if data_str:
+                        try:
+                            payload = json.loads(data_str)
+                            status = (payload.get("group") or {}).get("status") or "unknown"
+                            if on_progress:
+                                on_progress(90, f"Soundcheck: {status}")
+                            if event_name == "group_complete":
+                                return status
+                        except Exception:
+                            pass
+                    event_name = ""
+                elif not line:
+                    event_name = ""
+    except Exception as exc:
+        logger.warning("QA3 Soundcheck SSE stream failed (group %s): %s", group_id, exc)
+    return "unknown"
 
 
 def _http_json(
