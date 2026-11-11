@@ -5795,7 +5795,6 @@ def _stream_soundcheck_group_sse(
     Falls back to 'unknown' on any connection error so the caller can still
     use the check-status DB lookup to surface per-workshop results.
     """
-    import socket
     import urllib.error
     import urllib.request
 
@@ -5813,7 +5812,7 @@ def _stream_soundcheck_group_sse(
                     return "cancelled"
                 try:
                     raw_line = resp.readline()
-                except socket.timeout:
+                except TimeoutError:
                     # Server is quiet but still alive — just keep waiting.
                     continue
                 if not raw_line:
