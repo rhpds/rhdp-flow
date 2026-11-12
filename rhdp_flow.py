@@ -4648,7 +4648,7 @@ def _get_workshop_provision_readiness(
     return result
 
 
-def qa1_verify_setup(
+def qa2_verify_setup(
     csv_file: str,
     namespace: str,
     config: RHDPConfig
@@ -5053,7 +5053,7 @@ def qa1_verify_setup(
     
     return results
 
-def qa2_verify_deployment_status(
+def qa3_verify_deployment_status(
     csv_file: str,
     namespace: str,
     config: RHDPConfig,
@@ -5638,7 +5638,7 @@ def _enrich_qa2_results_with_soundcheck(
     return summary
 
 
-def qa3_verify_catalog_items_exist(
+def qa1_verify_catalog_items_exist(
     csv_file: str,
     config: RHDPConfig
 ) -> list[dict]:
@@ -7936,7 +7936,7 @@ def main():
             # Catalog once on full CSV (not namespace-specific)
             if args.qa == "1":
                 logger.info("")
-                results_catalog = qa3_verify_catalog_items_exist(args.input_csv, config)
+                results_catalog = qa1_verify_catalog_items_exist(args.input_csv, config)
                 qa_export_results(results_catalog, "qa1_catalog.csv")
                 logger.info("QA1 catalog results exported to: qa1_catalog.csv")
 
@@ -7944,7 +7944,7 @@ def main():
                 # QA2: Verify Setup
                 if args.qa in ["2", "both"]:
                     logger.info("")
-                    r_setup = qa1_verify_setup(args.input_csv, namespace, config)
+                    r_setup = qa2_verify_setup(args.input_csv, namespace, config)
                     results_setup.extend(r_setup)
 
                     qa2_output_file = f"qa2_setup_{namespace}.csv"
@@ -7954,7 +7954,7 @@ def main():
                 # QA3: Verify Deployment Status
                 if args.qa in ["3", "both"]:
                     logger.info("")
-                    r_deploy = qa2_verify_deployment_status(args.input_csv, namespace, config)
+                    r_deploy = qa3_verify_deployment_status(args.input_csv, namespace, config)
                     results_deploy.extend(r_deploy)
 
                     qa3_output_file = f"qa3_deployment_{namespace}.csv"

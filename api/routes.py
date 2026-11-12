@@ -122,9 +122,9 @@ from rhdp_flow import (
     load_asset_passwords,
     lock_workshops,
     process_schedule,
-    qa1_verify_setup,
-    qa2_verify_deployment_status,
-    qa3_verify_catalog_items_exist,
+    qa1_verify_catalog_items_exist,
+    qa2_verify_setup,
+    qa3_verify_deployment_status,
     qa_destroy_check,
     read_csv_input,
     resolve_admin_ops_url,
@@ -2953,13 +2953,13 @@ def _run_qa_over(
             temp_csv_paths.append(temp_path)
 
             if run_setup:
-                all_setup.extend(qa1_verify_setup(temp_path, ns, config))
+                all_setup.extend(qa2_verify_setup(temp_path, ns, config))
             if run_deploy:
                 # Defer Soundcheck: run it ONCE across all namespaces after the
                 # loop (one batched kickoff with live progress + cancel), not a
                 # separate kickoff+poll per namespace.
                 all_deploy.extend(
-                    qa2_verify_deployment_status(temp_path, ns, config, enrich_soundcheck=False)
+                    qa3_verify_deployment_status(temp_path, ns, config, enrich_soundcheck=False)
                 )
 
         cancelled = bool(job_id and jobs.is_cancel_requested(job_id))
@@ -3022,7 +3022,7 @@ def _run_qa_over(
                     ci_names=ci_names,
                 )
                 temp_csv_paths.append(cat_path)
-                all_catalog.extend(qa3_verify_catalog_items_exist(cat_path, config))
+                all_catalog.extend(qa1_verify_catalog_items_exist(cat_path, config))
             elif ns_set:
                 combined = tempfile.NamedTemporaryFile(
                     delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8"
@@ -3053,7 +3053,7 @@ def _run_qa_over(
                             "Session Date": getattr(s, "session_date", "") or "",
                         })
                 temp_csv_paths.append(combined.name)
-                all_catalog.extend(qa3_verify_catalog_items_exist(combined.name, config))
+                all_catalog.extend(qa1_verify_catalog_items_exist(combined.name, config))
 
         if qa_type == "1":
             all_raw = all_catalog

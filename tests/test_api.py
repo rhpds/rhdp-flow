@@ -798,7 +798,7 @@ def test_qa_no_schedules(client):
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_run_returns_job_id_and_streams(mock_qa1, _mock_cfg, uploaded_client):
     """POST /qa/run must return a job id immediately instead of blocking."""
     mock_qa1.return_value = []
@@ -836,7 +836,7 @@ def test_qa_results_empty(client):
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_results_emits_scope_metadata(mock_qa1, _mock_cfg, uploaded_client):
     """A completed QA run must publish coverage scope on /qa/results."""
     mock_qa1.return_value = []
@@ -858,7 +858,7 @@ Workshop B,vendor.b.prod,qa-ns-b,12,True,pass456,Admin,QA,Workshop B,01/01/2026 
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_run_with_namespace_override_filters_csv(mock_qa1, _mock_cfg, client):
     """QA namespace override should run against only matching schedule rows."""
     upload = client.post(
@@ -903,7 +903,7 @@ Thu Lab,vendor.thu.prod,qa-ns,10,True,pass,Admin,QA,Thu Lab,01/10/2026 10:30,01/
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_run_floor_day_scopes_catalog_setup_healthy(mock_qa1, _mock_cfg, client):
     """floor=day must QA only Ops Floor day rows (not the whole multi-day event)."""
     upload = client.post(
@@ -961,7 +961,7 @@ def test_qa_run_floor_day_requires_floor_date(client):
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_run_ci_names_subset_and_merge_retry(mock_qa1, _mock_cfg, client):
     """Multi-day / early-deploy: QA a CI subset, then retry failed without wiping passes."""
     upload = client.post(
@@ -1012,8 +1012,8 @@ def test_qa_run_ci_names_subset_and_merge_retry(mock_qa1, _mock_cfg, client):
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa2_verify_deployment_status")
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa3_verify_deployment_status")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_run_both_merges_one_row_per_workshop(mock_qa1, mock_qa2, _mock_cfg, client):
     """Running both QA types must not duplicate rows; QA2 row wins for the same workshop."""
     csv_single = """CI Name,CI,Namespace,Users,Enable_workshop_interface,Password,Activity,Purpose,Workshop Name,Provisioning Date (UTC),Auto-stop (UTC),Auto-destroy (UTC)
@@ -1076,7 +1076,7 @@ def test_qa_namespaces_with_schedules(uploaded_client):
 
 
 @patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
-@patch("api.routes.qa1_verify_setup")
+@patch("api.routes.qa2_verify_setup")
 def test_qa_status_emoji_stripped(mock_qa1, _mock_cfg, uploaded_client):
     """Normalize must strip emoji from status strings."""
     mock_qa1.return_value = [{
