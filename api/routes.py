@@ -632,6 +632,8 @@ def _result_to_response(r: DeploymentResult) -> DeploymentResultResponse:
 
 def _ingest_schedule_csv_text(text: str, filename: str) -> UploadResponse:
     """Parse CSV text, replace in-memory schedules, return upload response."""
+    from api.services.num_users_validation import validate_num_users_in_sessions
+
     global _schedules, _csv_filepath, _current_filename
     text = text.lstrip("\ufeff")
     if len(text.encode("utf-8")) > MAX_UPLOAD_SIZE_BYTES:
@@ -649,6 +651,28 @@ def _ingest_schedule_csv_text(text: str, filename: str) -> UploadResponse:
     except ValueError as e:
         os.unlink(tmp.name)
         raise HTTPException(400, str(e))
+
+    # Validate num_users parameter support for selected labs
+    sessions_for_validation = [{"CI Name": s.ci, "Users": s.users} for s in schedules]
+    violations = validate_num_users_in_sessions(sessions_for_validation)
+    if violations:
+        os.unlink(tmp.name)
+        violation_details = []
+        for v in violations[:10]:
+            violation_details.append(
+                f"Row {v['row_number']}: {v['ci_name']} has users override but doesn't support num_users parameter"
+            )
+        if len(violations) > 10:
+            violation_details.append(f"... and {len(violations) - 10} more violations")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "users_override_unsupported",
+                "message": "Users override is set on labs that don't support the num_users parameter (locked at 5 instances). Remove the override or deselect these labs.",
+                "violations": violation_details,
+                "count": len(violations),
+            },
+        )
     with _state_lock:
         _schedules = schedules
         _current_filename = filename
