@@ -2515,6 +2515,22 @@ def clear_deploy_results(_key=Depends(verify_api_key)):
     return {"cleared": cleared, "remaining": 0}
 
 
+@router.post("/qa/results/clear")
+def clear_qa_results(_key=Depends(verify_api_key)):
+    """Remove all QA result rows and reset QA scope state.
+
+    Clears the in-memory results list and the persisted snapshot.
+    This is a view-only cleanup — it does NOT affect running QA jobs or cluster state.
+    """
+    global _qa_results, _qa_last_scope
+    with _state_lock:
+        cleared = len(_qa_results)
+        _qa_results = []
+        _qa_last_scope = None
+        _save_qa_results()
+    return {"cleared": cleared, "remaining": 0}
+
+
 @router.post("/deploy/preview")
 def deploy_preview(body: DeployRequest = DeployRequest(), _key=Depends(verify_api_key)):  # type: ignore
     """Preview the deployment plan, including multi-region user splits.
