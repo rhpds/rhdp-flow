@@ -1777,7 +1777,9 @@ export const UploadTab: React.FC<Props> = ({
         <CardTitle>Import from Labagator</CardTitle>
         <CardBody>
           {labagatorUnavailable ? (
-            <Alert variant="warning" isInline title="Labagator is unavailable — use manual CSV export instead" />
+            <Alert variant="info" isInline title="Labagator auto-import not available">
+              If you deployed here from Labagator, your schedule is already loaded above. Otherwise, export a CSV from Labagator&apos;s Flow tab and upload it in the section above.
+            </Alert>
           ) : (
             <>
               <Split hasGutter style={{ marginBottom: 12, alignItems: 'flex-end' }}>
