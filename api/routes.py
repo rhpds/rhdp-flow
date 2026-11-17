@@ -86,6 +86,7 @@ from api.models import (
     UsersBlankCatalogDefaultAdvisory,
     UsersNotInCatalogAdvisory,
     WorkshopScheduleResponse,
+    WorkshopStateResponse,
 )
 from api.services import labagator_client
 from api.services.labagator_import import transform_labagator_to_flow
@@ -2914,6 +2915,59 @@ def op_import_namespace(request: Request, namespace: str, _key=Depends(verify_ap
         _iter(),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=imported_{namespace}.csv"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Babylon cluster proxy
+# ---------------------------------------------------------------------------
+
+
+@router.get("/babylon/workshop-state", response_model=WorkshopStateResponse)
+def babylon_workshop_state(namespace: str, name: str, _key=Depends(verify_api_key)):
+    """Return live Workshop CR state from the Babylon cluster via oc get workshop.
+
+    Lets Labagator fetch fresh Babylon state when its own K8s client is unavailable.
+    Returns found=False when the Workshop does not exist; raises 502/504 on cluster errors.
+    """
+    config = _get_config()
+    cmd = [config.oc_command, "get", "workshop", name, "-n", namespace, "-o", "json"]
+    env = os.environ.copy()
+    if config.kubeconfig_path:
+        env["KUBECONFIG"] = config.kubeconfig_path
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "oc get workshop timed out")
+    if result.returncode != 0:
+        stderr = result.stderr.strip().lower()
+        if "not found" in stderr or "notfound" in stderr:
+            return WorkshopStateResponse(found=False)
+        raise HTTPException(502, f"oc error: {result.stderr.strip()[:200]}")
+    try:
+        ws = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise HTTPException(502, "Failed to parse workshop JSON")
+    spec = ws.get("spec") or {}
+    lifespan = spec.get("lifespan") or {}
+    status_obj = ws.get("status") or {}
+    raw_counts = status_obj.get("provisionCount") or {}
+    ordered = int(raw_counts["ordered"]) if "ordered" in raw_counts else None
+    active = int(raw_counts.get("active") or 0)
+    if ordered is not None and ordered > 0 and active >= ordered:
+        phase = "ready"
+    elif int(raw_counts.get("failed") or 0) > 0:
+        phase = "failed"
+    elif ordered is not None:
+        phase = "pending"
+    else:
+        phase = None
+    return WorkshopStateResponse(
+        found=True,
+        phase=phase,
+        ordered=ordered,
+        lifespan_end=lifespan.get("end"),
+        stop_date=lifespan.get("start"),
     )
 
 

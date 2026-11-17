@@ -331,6 +331,16 @@ class JobResponse(BaseModel):
     log_file: str | None = None
 
 
+class WorkshopStateResponse(BaseModel):
+    """Live Workshop CR state fetched from the Babylon cluster."""
+
+    found: bool
+    phase: str | None = None
+    ordered: int | None = None
+    lifespan_end: str | None = None
+    stop_date: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Generic
 # ---------------------------------------------------------------------------
