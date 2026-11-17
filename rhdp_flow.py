@@ -3227,11 +3227,17 @@ def validate_catalog_item_exists(
             return _cache_and_return((False, None, suggestion, ci, [ci]))
         return _cache_and_return((True, expected_namespace, None, None, []))
 
-    # Exact name in other catalog namespaces (same CI string — namespace redirect only)
+    # Exact name in other catalog namespaces (same CI string — namespace redirect only).
+    # babylon-catalog-event is treated as a valid match regardless of expected stage:
+    # event-catalog items from secondary agnosticv repos (e.g. zt-rhelbu-agnosticv) are
+    # sometimes published with a .test suffix into babylon-catalog-event rather than
+    # babylon-catalog-test, and event-catalog is always a valid deployment target.
     for ns in ("babylon-catalog-event", "babylon-catalog-prod", "babylon-catalog-dev", "babylon-catalog-test"):
         if ns == expected_namespace:
             continue
         if ns in _ns_for(ci):
+            if ns == "babylon-catalog-event":
+                return _cache_and_return((True, ns, None, None, []))
             suggestion = (
                 f"Expected in {expected_namespace}, found in {ns}. "
                 f"Will deploy from {ns} (where item actually exists)."
