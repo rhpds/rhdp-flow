@@ -5503,8 +5503,38 @@ def _enrich_qa2_results_with_soundcheck(
     for sched, _wname, wid in pairs:
         ci_to_ids.setdefault(sched.ci, []).append(wid)
 
-    all_ids = list(dict.fromkeys(wid for _, _, wid in pairs))[:40]
+    # Skip workshops that aren't deployed/ready yet. Including a still-provisioning
+    # workshop in the Soundcheck group means the group never reaches 'complete'
+    # (it waits on a provision that hasn't finished), which hangs the whole QA
+    # sweep when running against "all". Only CIs whose QA row is *explicitly*
+    # not-ready are skipped; rows with unknown/True readiness are still checked.
+    not_ready_cis = {(r.get("ci") or "") for r in results if r.get("ready") is False}
+    skip_ids = {
+        wid
+        for ci, ids in ci_to_ids.items()
+        if ci in not_ready_cis
+        for wid in ids
+    }
+    all_ids = [
+        wid
+        for wid in dict.fromkeys(wid for _, _, wid in pairs)
+        if wid not in skip_ids
+    ][:40]
     summary["checked"] = len(all_ids)
+
+    # Every workshop in scope was skipped as not-ready — don't kick off an empty
+    # group (it would never complete). Mark those rows and return.
+    if not all_ids:
+        for r in results:
+            if (r.get("ci") or "") in not_ready_cis:
+                r["showroom_status"] = "not ready"
+                r.setdefault("showroom_url", "")
+            else:
+                r.setdefault("showroom_status", "")
+                r.setdefault("showroom_url", "")
+        summary["session_status"] = "skipped: no ready workshops"
+        return summary
+
     base = _soundcheck_base_url()
     group_id = ""
     group_url = f"{base}/check?workshop={','.join(all_ids)}"
@@ -5580,7 +5610,11 @@ def _enrich_qa2_results_with_soundcheck(
     # Showroom cell reads as "fine / not checked" and hides the outage.
     if not summary["reachable"]:
         for r in results:
-            if ci_to_ids.get(r.get("ci") or ""):
+            ci = r.get("ci") or ""
+            if ci in not_ready_cis:
+                r["showroom_status"] = "not ready"
+                r.setdefault("showroom_url", "")
+            elif ci_to_ids.get(ci):
                 r["showroom_status"] = "unreachable"
                 r["showroom_url"] = group_url
                 note = "Soundcheck unreachable"
@@ -5599,6 +5633,13 @@ def _enrich_qa2_results_with_soundcheck(
         schedule = sched_by_ci.get(ci)
         ids = ci_to_ids.get(ci) or []
         has_showroom = bool(getattr(schedule, "showroom_repo", "") if schedule else "")
+        # Workshops skipped above (not deployed/ready) weren't part of the group,
+        # so their ids carry no status — label them explicitly instead of letting
+        # the group's status bleed onto a workshop we never actually checked.
+        if ci in not_ready_cis:
+            r["showroom_status"] = "not ready"
+            r.setdefault("showroom_url", "")
+            continue
         if not ids:
             r.setdefault("showroom_status", "")
             r.setdefault("showroom_url", "")
@@ -5811,12 +5852,19 @@ def _stream_soundcheck_group_sse(
     is_cancelled=None,
     on_progress=None,
     socket_timeout: float = 90.0,
+    overall_timeout: float = 300.0,
 ) -> str:
     """Stream GET /api/groups/{id}/stream until group_complete or EOF.
 
     Returns the final group status string ('completed', 'failed', etc.).
     Falls back to 'unknown' on any connection error so the caller can still
     use the check-status DB lookup to surface per-workshop results.
+
+    ``overall_timeout`` caps the total time we wait for the group to finish.
+    Without it, a workshop that never completes (e.g. still provisioning when
+    QA runs against "all") keeps the stream open forever and hangs the whole
+    QA sweep. On expiry we return 'timeout' and let the caller fall back to the
+    check-status DB lookup.
     """
     import urllib.error
     import urllib.request
@@ -5827,16 +5875,25 @@ def _stream_soundcheck_group_sse(
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers, method="GET")
     event_name = ""
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
             while True:
                 if is_cancelled and is_cancelled():
                     logger.info("QA3 Soundcheck SSE cancelled (group %s)", group_id)
                     return "cancelled"
+                if time.monotonic() - started > overall_timeout:
+                    logger.warning(
+                        "QA3 Soundcheck SSE overall timeout after %.0fs (group %s)",
+                        overall_timeout,
+                        group_id,
+                    )
+                    return "timeout"
                 try:
                     raw_line = resp.readline()
                 except TimeoutError:
-                    # Server is quiet but still alive — just keep waiting.
+                    # Server is quiet but still alive — keep waiting, but the
+                    # overall-timeout check above still bounds the total wait.
                     continue
                 if not raw_line:
                     break

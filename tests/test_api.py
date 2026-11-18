@@ -1059,6 +1059,67 @@ W1,vendor.w.prod,ns1,10,True,pw,Adm,QA,W1,01/01/2026 09:00,01/01/2026 17:00,02/0
     assert data["results"][0]["actual_count"] == 10
 
 
+@patch("api.routes._get_config", return_value=MagicMock(kubeconfig_path=None))
+@patch("api.routes.qa3_verify_deployment_status")
+@patch("api.routes.qa2_verify_setup")
+def test_qa_separate_stages_do_not_overwrite_each_other(mock_setup, mock_healthy, _mock_cfg, client):
+    """Regression: running a later QA stage must not wipe an earlier stage's results.
+
+    Results are keyed by (namespace, ci_name, qa_type), so QA2 (setup) and QA3
+    (healthy) for the same workshop coexist instead of the second clobbering the
+    first.
+    """
+    csv_single = """CI Name,CI,Namespace,Users,Enable_workshop_interface,Password,Activity,Purpose,Workshop Name,Provisioning Date (UTC),Auto-stop (UTC),Auto-destroy (UTC)
+W1,vendor.w.prod,ns1,10,True,pw,Adm,QA,W1,01/01/2026 09:00,01/01/2026 17:00,02/01/2026 09:00
+"""
+    upload = client.post(
+        "/api/schedules/upload",
+        files={"file": ("q.csv", csv_single.encode(), "text/csv")},
+    )
+    assert upload.status_code == 200
+
+    def _row(status):
+        return [{
+            "ci_name": "W1",
+            "ci": "vendor.w.prod",
+            "namespace": "ns1",
+            "deployed": "Yes",
+            "status": status,
+            "expected_users": 10,
+            "actual_count": 10,
+            "landing_page_url": "",
+            "healthy": True,
+            "ready": True,
+        }]
+
+    # QA2 (setup) first.
+    mock_setup.return_value = _row("setup-ok")
+    _job_id, s2 = _run_qa_and_wait(client, {"type": "2"})
+    assert s2["status"] == "completed"
+    first = client.get("/api/qa/results").json()
+    assert first["count"] == 1
+    assert first["results"][0]["qa_type"] == "2"
+    assert first["results"][0]["status"] == "setup-ok"
+
+    # QA3 (healthy) next — must keep the QA2 row, not replace it.
+    mock_healthy.return_value = _row("healthy-ok")
+    _job_id, s3 = _run_qa_and_wait(client, {"type": "3"})
+    assert s3["status"] == "completed"
+    data = client.get("/api/qa/results").json()
+    assert data["count"] == 2
+    by_type = {r["qa_type"]: r["status"] for r in data["results"]}
+    assert by_type == {"2": "setup-ok", "3": "healthy-ok"}
+
+    # Re-running QA3 replaces only its own row (same key) — still two rows.
+    mock_healthy.return_value = _row("healthy-rerun")
+    _job_id, s3b = _run_qa_and_wait(client, {"type": "3"})
+    assert s3b["status"] == "completed"
+    data = client.get("/api/qa/results").json()
+    assert data["count"] == 2
+    by_type = {r["qa_type"]: r["status"] for r in data["results"]}
+    assert by_type == {"2": "setup-ok", "3": "healthy-rerun"}
+
+
 def test_qa_namespaces_empty(client):
     """qa/namespaces returns empty list when no schedules loaded."""
     resp = client.get("/api/qa/namespaces")

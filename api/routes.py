@@ -3265,20 +3265,28 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 ci_names=ci_names,
                 namespaces=namespaces,
             )
-            # Subset / retry-failed: replace only those CI names; keep prior passes.
-            if ci_names:
-                selected = set(ci_names)
-                with _state_lock:
-                    kept = [r for r in _qa_results if (r.ci_name or "") not in selected]
-                    all_results = kept + new_results
-                    _qa_results = all_results
-                    _qa_log_path = log_path
+            # Stamp this run's stage + time so results from different QA stages
+            # (or different events/namespaces) can coexist instead of clobbering
+            # each other. A row is only replaced by a newer row with the same
+            # (namespace, ci_name, qa_type) key.
+            run_at = datetime.now(UTC).isoformat()
+            for r in new_results:
+                r.qa_type = qa_type
+                r.run_at = run_at
+            new_keys = {(r.namespace, r.ci_name, qa_type) for r in new_results}
+            with _state_lock:
+                kept = [
+                    r for r in _qa_results
+                    if (r.namespace, r.ci_name, getattr(r, "qa_type", "")) not in new_keys
+                ]
+                all_results = kept + new_results
+                _qa_results = all_results
+                _qa_log_path = log_path
+                # Subset/retry merges coverage onto the prior scope; a full run of
+                # a stage replaces it with what this run actually covered.
+                if ci_names:
                     _qa_last_scope = merge_qa_coverage(_qa_last_scope, coverage)
-            else:
-                all_results = new_results
-                with _state_lock:
-                    _qa_results = all_results
-                    _qa_log_path = log_path
+                else:
                     _qa_last_scope = coverage
             _save_qa_results()
             # Push QA1 (catalog check) results to Labagator to patch the Confluence
@@ -3288,7 +3296,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                     ns_list = list(namespaces)
                     push_ns = ns_list[0] if len(ns_list) == 1 else ""
                     if push_ns:
-                        qa1_rows = [r for r in all_results if r.ci_name]
+                        qa1_rows = [r for r in new_results if r.ci_name]
                         labagator_client.push_qa1_status(
                             namespace=push_ns,
                             floor_date=floor_date,
@@ -3304,7 +3312,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                                 }
                                 for r in qa1_rows
                             ],
-                            run_at=datetime.now(UTC).isoformat(),
+                            run_at=run_at,
                         )
                 except Exception:
                     pass  # never let Confluence update block QA job completion
@@ -3312,7 +3320,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 jobs.update_job(
                     job.job_id,
                     status=jobs.Status.cancelled,
-                    message=f"Cancelled after {len(all_results)} result(s)",
+                    message=f"Cancelled after {len(new_results)} result(s)",
                     log_path=log_path,
                 )
             else:

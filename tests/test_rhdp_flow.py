@@ -2855,6 +2855,93 @@ class TestSoundcheckEnrich(unittest.TestCase):
         self.assertTrue(progress)
         self.assertTrue(any("Soundcheck" in msg for _pct, msg in progress))
 
+    def test_not_ready_workshops_skipped_from_kickoff(self):
+        """A still-provisioning (ready=False) workshop must be excluded from the
+        Soundcheck group so it can't keep the group from ever completing."""
+        import rhdp_flow
+
+        s_ready = make_schedule(ci="ci.ready.prod", namespace="ns")
+        s_notready = make_schedule(ci="ci.notready.prod", namespace="ns")
+        r_ready = {"ci": "ci.ready.prod", "issues": "", "ready": True}
+        r_notready = {"ci": "ci.notready.prod", "issues": "", "ready": False}
+        kickoffs = []
+
+        def fake_collect(scheduled_items, namespace, config):
+            return [(s_ready, "ws-r", "wid-ready"), (s_notready, "ws-n", "wid-notready")]
+
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
+            if url.endswith("/api/groups") and method == "POST":
+                kickoffs.append(body or {})
+                return {"group_id": "grp-s"}
+            if "/api/groups/" in url and url.endswith("/run"):
+                return {}
+            if "/api/groups/" in url:
+                return {"group": {"status": "completed"}}
+            if url.endswith("/api/workshops/check-status"):
+                return {"statuses": {"wid-ready": {"status": "completed", "session_id": "grp-s"}}}
+            return {}
+
+        with self._no_sleep(), patch(
+            "rhdp_flow._collect_workshop_ids_for_schedules", side_effect=fake_collect
+        ), patch("rhdp_flow._http_json", side_effect=fake_http):
+            rhdp_flow._enrich_qa2_results_with_soundcheck(
+                [r_ready, r_notready], [s_ready, s_notready], ["ns"], make_config()
+            )
+
+        self.assertEqual(len(kickoffs), 1)
+        guids = kickoffs[0].get("workshop_guids", [])
+        self.assertIn("wid-ready", guids)
+        self.assertNotIn("wid-notready", guids)
+        self.assertEqual(r_ready["showroom_status"], "healthy")
+        self.assertEqual(r_notready["showroom_status"], "not ready")
+
+    def test_all_not_ready_skips_kickoff_entirely(self):
+        """If nothing in scope is ready, don't kick off an empty group (it would
+        never complete) — mark the rows and return."""
+        import rhdp_flow
+
+        sched = make_schedule(ci="ci.notready.prod", namespace="ns")
+        result = {"ci": "ci.notready.prod", "issues": "", "ready": False}
+        http_calls = []
+
+        def fake_http(method, url, body=None, timeout=30.0, extra_headers=None):
+            http_calls.append(url)
+            return {}
+
+        with self._no_sleep(), patch(
+            "rhdp_flow._collect_workshop_ids_for_schedules",
+            return_value=[(sched, "ws-n", "wid-n")],
+        ), patch("rhdp_flow._http_json", side_effect=fake_http):
+            summary = rhdp_flow._enrich_qa2_results_with_soundcheck(
+                [result], [sched], ["ns"], make_config()
+            )
+
+        self.assertEqual(http_calls, [])  # no group/check-status calls at all
+        self.assertEqual(result["showroom_status"], "not ready")
+        self.assertTrue(summary["session_status"].startswith("skipped"))
+
+    def test_stream_overall_timeout_short_circuits(self):
+        """The SSE loop must bail at the overall deadline instead of looping
+        forever when a group never emits group_complete."""
+        import rhdp_flow
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def readline(self):
+                raise AssertionError("should return at the deadline before reading")
+
+        with patch("urllib.request.urlopen", return_value=FakeResp()):
+            status = rhdp_flow._stream_soundcheck_group_sse(
+                "http://soundcheck.example", "grp-t", None, overall_timeout=-1.0
+            )
+
+        self.assertEqual(status, "timeout")
+
 
 # ============================================================================
 # ENTRY POINT
