@@ -8,6 +8,19 @@ class ParameterValidationError(ValueError):
     pass
 
 
+def catalog_uses_multi_user(lab) -> bool:
+    schema = (lab.catalog_parameters or {}).get("schema", [])
+    if not any(item.get("name") == "num_users_param" for item in schema):
+        return False
+    toggle = next((item for item in schema if item.get("name") == "create_multi_user"), None)
+    if toggle is None:
+        return (getattr(lab, "deploy_mode", None) or "").lower() == "shared"
+    value = toggle.get("value")
+    if value is None:
+        value = (toggle.get("openAPIV3Schema") or {}).get("default")
+    return value is True or value == "true"
+
+
 def _reject_references(value):
     if isinstance(value, dict):
         if any(key in value for key in ("$ref", "$dynamicRef", "$recursiveRef")):

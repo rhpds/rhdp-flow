@@ -9,6 +9,6 @@
   },
   "lib/dependency_parameters.py": {
     "labagator_source": "app/services/dependency_parameters.py",
-    "sha256": "52e98298bfa412edc9bcacde6d6d67343ebb34331cfe76da5509d3824cef9258"
+    "sha256": "a2d089e3d0dfc999894695ecc7ed9ccd2ef7333aaa0638dd54e8b812e070b56d"
   }
 }
