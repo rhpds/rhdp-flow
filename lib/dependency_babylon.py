@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 
+from lib.dependency_lifetime import effective_deadline_verified, validate_policy
 from lib.dependency_parameters import ParameterValidationError, validate_parameters
 
 
@@ -65,12 +66,7 @@ class BabylonDependencyAdapter:
         validate_parameters(definitions, parameters, pending=set(pending))
 
     def parent_lifetime_capability(self, plan, parent):
-        """A planned end cannot override provider defaults or controller maxima.
-
-        Only providers with no autonomous expiry/detach anywhere in their linked
-        graph can support a parent whose deletion waits for all child resources.
-        Poolboy namespace must be explicitly configured, never inferred from CI.
-        """
+        """Check catalog resource providers against the requested parent deadline."""
         namespace = os.environ.get('RHDP_DEPENDENCY_POOLBOY_NAMESPACE', '')
         if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', namespace):
             raise ValueError('parent_expiry_hold_unverified')
@@ -87,22 +83,29 @@ class BabylonDependencyAdapter:
             if not provider or provider.get('metadata', {}).get('deletionTimestamp'):
                 raise ValueError('parent_expiry_hold_unverified')
             spec = provider.get('spec') or {}
-            lifespan = spec.get('lifespan') or {}
-            if (not isinstance(lifespan, dict) or any(lifespan.get(k) for k in
-                ('default', 'maximum', 'relativeMaximum')) or spec.get('autoDetach')):
-                raise ValueError('parent_expiry_hold_unverified')
+            validate_policy(spec, parent.deploy_on.isoformat(), parent.auto_destroy.isoformat())
             for linked in spec.get('linkedResourceProviders') or []:
                 if not isinstance(linked, dict):
                     raise ValueError('parent_expiry_hold_unverified')  # noqa: TRY004 -- safe public error taxonomy
                 visit(linked.get('name'), active | {name})
             seen.add(name)
 
-        visit(parent.ci_name, set())
+        catalog = self._get('catalogitem', parent.ci_name, parent.catalog_namespace)
+        if not catalog or catalog.get('metadata', {}).get('deletionTimestamp'):
+            raise ValueError('catalog_item_unavailable')
+        validate_policy(catalog.get('spec') or {}, parent.deploy_on.isoformat(), parent.auto_destroy.isoformat())
+        resources = catalog.get('spec', {}).get('resources')
+        if not isinstance(resources, list) or not resources:
+            raise ValueError('parent_expiry_hold_unverified')
+        for resource in resources:
+            provider = resource.get('provider') or {}
+            if provider.get('namespace', namespace) != namespace:
+                raise ValueError('parent_expiry_hold_unverified')
+            visit(provider.get('name'), set())
 
-    def _parent_claim_hold(self, claim):
+    def _parent_claim_hold(self, claim, parent):
         metadata, spec, status = (claim.get(k) or {} for k in ('metadata', 'spec', 'status'))
-        if (metadata.get('deletionTimestamp') or spec.get('lifespan', {}).get('end') or
-            status.get('lifespan', {}).get('end') or status.get('detached') or spec.get('autoDetach') or
+        if (metadata.get('deletionTimestamp') or status.get('detached') or spec.get('autoDetach') or
             spec.get('autoDelete')):
             raise ValueError('parent_expiry_hold_unverified')
         ref = status.get('resourceHandle')
@@ -118,9 +121,7 @@ class BabylonDependencyAdapter:
         if (reverse.get('name') != metadata.get('name') or
             reverse.get('namespace') != metadata.get('namespace')):
             raise ValueError('parent_expiry_hold_unverified')
-        if any((handle.get(k) or {}).get('lifespan', {}).get(field)
-               for k in ('spec', 'status') for field in ('end', 'maximum', 'relativeMaximum')):
-            raise ValueError('parent_expiry_hold_unverified')
+        return effective_deadline_verified(claim, handle, parent.auto_destroy.isoformat())
 
     @staticmethod
     def labels(plan, node, token):
@@ -154,7 +155,6 @@ class BabylonDependencyAdapter:
             obj['spec']['lifespan'] = {'start': node.deploy_on.isoformat(), 'end': node.auto_destroy.isoformat()}
             obj['spec']['actionSchedule'] = {'start': node.deploy_on.isoformat()}
             if node.role == 'parent':
-                obj['spec']['lifespan'].pop('end', None)
                 obj['spec']['autoDetach'] = {}
         result = {}
         for kind, obj, field in [('workshop', workshop, 'workshop_uid'),
@@ -217,7 +217,8 @@ class BabylonDependencyAdapter:
         result['claim_refs'] = json.dumps([{'name': r['name'], 'uid': r['uid']} for r in refs], sort_keys=True)
         if node.role == 'parent':
             result.update(claim_name=refs[0]['name'], claim_uid=refs[0]['uid'])
-            self._parent_claim_hold(claims[0])
+            if not self._parent_claim_hold(claims[0], node):
+                return result
         # Save provenance during provisioning as soon as each handle binds;
         # readiness must not be the first chance to retain these identities.
         result.update(self.deletion_inventory(plan, node, {**record, **result}, require_complete=False))
@@ -261,7 +262,8 @@ class BabylonDependencyAdapter:
         claim = self._get('resourceclaim', record['claim_name'], plan.namespace)
         if not claim or claim.get('metadata', {}).get('uid') != record['claim_uid']:
             raise ValueError('parent_identity_mismatch')
-        self._parent_claim_hold(claim)
+        if not self._parent_claim_hold(claim, parent):
+            raise ValueError('parent_lifetime_acknowledgement_pending')
         return claim
 
     def _delete(self, kind, name, namespace, uid):

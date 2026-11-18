@@ -38,7 +38,7 @@ class Cluster:
             if kind == 'catalogitem':
                 params = [] if args[2].startswith('parent') else [
                     {'name': 'password', 'required': True, 'openAPIV3Schema': {'type': 'string'}}]
-                return {'spec': {'parameters': params}}
+                return {'spec': {'parameters': params, 'resources': [{'provider': {'name': args[2], 'namespace': 'poolboy'}}]}}
             if kind == 'resourceclaims':
                 uid = args[args.index('-l')+1].split('=', 1)[1]
                 return {'items': [copy.deepcopy(o) for (k,n),o in self.objects.items()
@@ -68,13 +68,14 @@ class Cluster:
         self.objects[('resourceclaim', claim_name)] = {'metadata': {
             'name': claim_name, 'namespace': self.plan.namespace, 'uid': f'uid-{claim_name}',
             'labels': {'babylon.gpte.redhat.com/workshop-uid': ws['metadata']['uid']}},
-            'status': {'ready': True, 'healthy': True,
+            'status': {'ready': True, 'healthy': True, 'lifespan': {'end': node.auto_destroy.isoformat()},
                 'resourceHandle': {'name': f'handle-{key}', 'namespace': 'poolboy'},
                 'resources': [{'name': 'leaderboard', 'state': {'kind': 'AnarchySubject',
                     'status': {'towerJobs': {'provision': {'completeTimestamp': 'done'}}},
                     'spec': {'vars': {'current_state': 'started', 'provision_data': {'password': 'synthetic-secret'}}}}}]}}
         self.objects[('resourcehandle', f'handle-{key}')] = {'metadata': {'uid': f'handle-uid-{key}'},
-            'spec': {'resourceClaim': {'name': claim_name, 'namespace': self.plan.namespace}}}
+            'spec': {'resourceClaim': {'name': claim_name, 'namespace': self.plan.namespace},
+                     'lifespan': {'end': node.auto_destroy.isoformat()}}}
 
 
 def test_real_adapter_lifecycle_and_child_handle_holds_parent(plan, store, monkeypatch):
@@ -84,7 +85,7 @@ def test_real_adapter_lifecycle_and_child_handle_holds_parent(plan, store, monke
     run = start(store, plan)
     reconcile(store, run, adapter, now=NOW)
     assert len(cluster.creates) == 2
-    assert all('end' not in o['spec']['lifespan'] for o in cluster.creates)
+    assert all(o['spec']['lifespan']['end'] == plan.nodes[0].auto_destroy.isoformat() for o in cluster.creates)
     reconcile(store, run, adapter, now=NOW)
     assert len(cluster.creates) == 2
     cluster.ready('parent')

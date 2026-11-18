@@ -61,15 +61,21 @@ is reread immediately before each child submission. Each child's own start and
 end window remains authoritative. Only the requested exact CatalogItem namespace
 and its complete parameter schema are used, with no fallback catalog search.
 
-Parent deletion requires an expiry hold that existing expiring providers cannot
-provide. Preflight recursively inspects exact ResourceProviders in the explicitly
-configured Poolboy namespace and refuses any default/max/relative lifespan or
-auto-detach policy, dynamic references, cycles, and graphs beyond eight providers.
-At runtime the claim and its reverse-linked ResourceHandle must have no effective
-expiry/detachment state. Parent Workshop/WorkshopProvision end times are omitted
-only after this preflight succeeds. An ordinary provider with a 48-hour default
-fails closed with `parent_expiry_hold_unverified`; removing the requested parent
-end alone does not solve autonomous expiry.
+The parent requests an explicit deadline covering all children plus a cleanup
+buffer (at least one hour at the API boundary; Labagator defaults to 24 hours).
+Preflight inspects each catalog resource and linked ResourceProvider in the
+configured Poolboy namespace. Defaults can be overridden; maximum and relative
+maximum policies must permit the deadline. Dynamic policies, detach settings,
+cycles, and graphs beyond eight providers fail closed. No provider policy changes
+are made. `POST /api/dependency-plans/preview` performs these checks without
+storing a plan or creating a deployment.
+
+Before students can start, both the claim's reported expiration and its exact
+reverse-linked ResourceHandle's effective expiration must cover the deadline.
+Missing acknowledgement waits; shorter deadlines block new orders. The check
+repeats on reconciliation and immediately before each child submission. This is
+a finite cleanup buffer, not an indefinite hold: automatic expiry can remove
+resources afterward. Existing plans remain immutable; extensions are unsupported.
 
 Cancellation retains existing resources. An explicit failed-child retry cleans
 and verifies exact child claims and handles absent, advances the durable attempt

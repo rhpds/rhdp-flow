@@ -1,6 +1,8 @@
 """Dependency transport is authenticated, target-bound and disabled by default."""
 # ruff: noqa: F811 -- imported pytest fixtures are resolved by argument name
 
+from datetime import timedelta
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -8,6 +10,25 @@ from fastapi.testclient import TestClient
 from api import dependency_routes as routes
 from lib.dependency_store import DependencyStore
 from tests.test_dependency_runtime import Adapter, plan  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def parent_cleanup_buffer(plan):
+    plan.nodes[0].auto_destroy += timedelta(hours=1)
+
+
+def test_preview_checks_buffer_without_staging(client, plan, monkeypatch):
+    monkeypatch.setattr(routes, 'RUNTIME_READY', True)
+    headers = {'X-API-Key': 'test-key', 'X-RHDP-Target-Cluster': 'events'}
+    response = client.post('/api/dependency-plans/preview', json=plan.model_dump(mode='json'), headers=headers)
+    assert response.status_code == 200
+    assert response.json()['supported'] is True
+    assert client.get('/api/dependency-plans/run-1', headers=headers).status_code == 404
+    plan.nodes[0].auto_destroy = plan.nodes[1].auto_destroy
+    for path in ('/api/dependency-plans', '/api/dependency-plans/preview'):
+        response = client.post(path, json=plan.model_dump(mode='json'), headers=headers)
+        assert response.status_code == 422
+        assert response.json()['detail'] == 'parent_cleanup_buffer_too_short'
 
 
 @pytest.fixture

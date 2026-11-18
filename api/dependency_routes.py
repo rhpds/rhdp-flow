@@ -1,6 +1,7 @@
 """Versioned dependency transport; ordinary CSV never receives dependency plans."""
 import os
 from contextlib import contextmanager
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -90,13 +91,16 @@ def capabilities():
             'disabled_reasons': [] if RUNTIME_READY else ['dependency_feature_disabled']}
 
 
-@router.post('/dependency-plans')
-def stage_plan(request: Request, payload: dict):
-    store = _store(request)
+def _validate_plan(request: Request, payload: dict):
+    _store(request)
     try:
         plan = DependencyPlan.model_validate(payload)
     except ValidationError as exc:
         raise HTTPException(422, safe_dependency_validation_errors(exc)) from None
+    parent = next(node for node in plan.nodes if node.role == 'parent')
+    if any(node.role == 'child' and parent.auto_destroy - node.auto_destroy < timedelta(hours=1)
+           for node in plan.nodes):
+        raise HTTPException(422, 'parent_cleanup_buffer_too_short')
     from api.routes import _requested_target, _resolve_target, _validate_namespace
     requested = (_requested_target(request) or '').strip()
     if not requested:
@@ -118,9 +122,23 @@ def stage_plan(request: Request, payload: dict):
     except HTTPException:
         raise
     except Exception as exc:
-        if str(exc) == 'parent_expiry_hold_unverified':
-            raise HTTPException(422, 'parent_expiry_hold_unverified') from None
+        if str(exc) in {'parent_expiry_hold_unverified', 'parent_lifetime_exceeds_policy',
+                        'parent_lifetime_policy_unresolved', 'parent_lifetime_invalid_timestamp'}:
+            raise HTTPException(422, str(exc)) from None
         raise HTTPException(422, 'dependency_catalog_validation_failed') from None
+    return plan, target
+
+
+@router.post('/dependency-plans/preview')
+def preview_plan(request: Request, payload: dict):
+    plan, target = _validate_plan(request, payload)
+    return {'supported': True, 'version': plan.version, 'target_cluster': target}
+
+
+@router.post('/dependency-plans')
+def stage_plan(request: Request, payload: dict):
+    plan, target = _validate_plan(request, payload)
+    store = _store(request)
     _call(lambda: store.stage(plan, target=target))
     return {'plan_id': plan.run_id, 'version': plan.version,
             'target_cluster': target, 'namespace': plan.namespace}

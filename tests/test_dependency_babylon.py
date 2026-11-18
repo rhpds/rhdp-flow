@@ -64,20 +64,22 @@ def test_parent_claim_uid_is_verified_and_failed_claim_blocks_readiness(plan, mo
     assert adapter.observe(plan, plan.nodes[0], {'token': 'token'})['state'] != 'ready'
 
 
-def test_parent_lifetime_hold_rejects_provider_defaults_and_recurses(plan, monkeypatch):
+def test_parent_lifetime_checks_maxima_and_recurses(plan, monkeypatch):
     monkeypatch.setenv('RHDP_DEPENDENCY_POOLBOY_NAMESPACE', 'poolboy')
     providers = {'parent.event': {'spec': {'linkedResourceProviders': [{'name': 'underlying'}]}},
                  'underlying': {'spec': {'lifespan': {'default': '48h'}}}}
     calls = []
     def command(args, payload=None):
         calls.append(args)
+        if args[1] == 'catalogitem':
+            return {'spec': {'resources': [{'provider': {'name': 'parent.event', 'namespace': 'poolboy'}}]}}
         return providers[args[2]]
     adapter = BabylonDependencyAdapter(None, command=command)
-    with pytest.raises(ValueError, match='parent_expiry_hold_unverified'):
-        adapter.parent_lifetime_capability(plan, plan.nodes[0])
-    providers['underlying']['spec'] = {}
     adapter.parent_lifetime_capability(plan, plan.nodes[0])
-    assert all(args[4] == 'poolboy' for args in calls)
+    providers['underlying']['spec'] = {'lifespan': {'maximum': '1h'}}
+    with pytest.raises(ValueError, match='parent_lifetime_exceeds_policy'):
+        adapter.parent_lifetime_capability(plan, plan.nodes[0])
+    assert all(args[4] == 'poolboy' for args in calls if args[1] != 'catalogitem')
 
 
 def test_parent_lifetime_requires_configured_provider_namespace(plan, monkeypatch):
