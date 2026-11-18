@@ -1,0 +1,22 @@
+{
+  "spec": {
+    "replicas": 1,
+    "strategy": {"type": "Recreate", "rollingUpdate": null},
+    "template": {
+      "spec": {
+        "containers": [{
+          "name": "rhdp-scheduler",
+          "env": [
+            {"name": "RHDP_FLOW_DATA_DIR", "value": "/app/data"},
+            {"name": "RHDP_ENABLE_DEPENDENCIES", "value": "true"},
+            {"name": "RHDP_DEPENDENCY_INSTANCE_COUNT", "value": "1"},
+            {"name": "WEB_CONCURRENCY", "value": "1"},
+            {"name": "RHDP_DEPENDENCY_POOLBOY_NAMESPACE", "value": "poolboy"}
+          ],
+          "volumeMounts": [{"name": "data", "mountPath": "/app/data"}]
+        }],
+        "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "rhdp-scheduler-data"}}]
+      }
+    }
+  }
+}
