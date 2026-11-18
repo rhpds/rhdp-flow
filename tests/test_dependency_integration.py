@@ -8,6 +8,7 @@ from pathlib import Path
 from lib.dependency_babylon import BabylonDependencyAdapter
 from lib.dependency_contract import DependencyPlan
 from lib.dependency_executor import reconcile
+from lib.dependency_store import DependencyStore
 from tests.test_dependency_runtime import NOW, Adapter, plan, start, store  # noqa: F401
 
 
@@ -219,3 +220,36 @@ def test_absent_unready_child_with_unrecorded_handle_cannot_release_parent(plan,
     assert ('workshop', 'test-parent') in cluster.objects
     assert ('resourcehandle', 'unknown-child') in cluster.objects
     assert store.status(run)['state'] == 'attention_required'
+
+
+def test_restart_after_early_automatic_expiry_uses_durable_handle_inventory(plan, store, monkeypatch):
+    monkeypatch.setenv('RHDP_DEPENDENCY_POOLBOY_NAMESPACE', 'poolboy')
+    plan.nodes[1].auto_destroy = NOW+timedelta(hours=1)
+    later = plan.nodes[1].model_copy(deep=True)
+    later.key, later.workshop_name = 'later', 'test-later'
+    later.auto_destroy = NOW+timedelta(hours=2)
+    plan.nodes.append(later)
+    cluster = Cluster(plan)
+    adapter = BabylonDependencyAdapter(None, command=cluster.command)
+    run = start(store, plan)
+    reconcile(store, run, adapter, now=NOW)
+    cluster.ready('parent')
+    reconcile(store, run, adapter, now=NOW)
+    cluster.ready('child')
+    cluster.ready('later')
+    reconcile(store, run, adapter, now=NOW)
+    assert store.status(run)['state'] == 'ready'
+    for kind, name in [('workshop', 'test-child'), ('workshopprovision', 'test-child'),
+                       ('resourceclaim', 'claim-child')]:
+        cluster.objects.pop((kind, name))
+    path = store.path
+    store.close()
+    with DependencyStore(path) as recovered:
+        reconcile(recovered, run, adapter, now=NOW+timedelta(hours=1))
+        assert recovered.status(run)['nodes'][1]['state'] == 'destroying'
+        assert ('workshop', 'test-parent') in cluster.objects
+        assert ('workshop', 'test-later') in cluster.objects
+        cluster.objects.pop(('resourcehandle', 'handle-child'))
+        reconcile(recovered, run, adapter, now=NOW+timedelta(hours=1))
+        assert recovered.status(run)['state'] == 'ready'
+        assert recovered.status(run)['nodes'][1]['state'] == 'destroyed'
