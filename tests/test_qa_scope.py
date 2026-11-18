@@ -76,6 +76,23 @@ def test_filter_ci_names_subset():
     assert [r.ci_name for r in scoped] == ["Keep"]
 
 
+def test_filter_ci_names_matches_ci_column():
+    """ci_names filter accepts the catalog slug from the CI column, not just ci_name."""
+    rows = [
+        _row(ci_name="Human Title", ci="org.my-lab.test"),
+        _row(ci_name="Other", ci="org.other-lab.test"),
+    ]
+    scoped = filter_schedules_by_scope(rows, ci_names=["Human Title"])
+    assert len(scoped) == 1
+
+    scoped = filter_schedules_by_scope(rows, ci_names=["org.my-lab.test"])
+    assert len(scoped) == 1
+
+    # Labagator sends base names (no stage suffix); Flow CSV has the staged form.
+    scoped = filter_schedules_by_scope(rows, ci_names=["org.my-lab"])
+    assert len(scoped) == 1
+
+
 def test_build_qa_scopes_labels():
     rows = [
         _row(session_date="2026-09-30", provisioning_date="30/09/2026 10:00"),

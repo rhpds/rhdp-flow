@@ -18,6 +18,22 @@ TIME_BANDS: tuple[tuple[str, str, int, int], ...] = (
     ("afternoon", "Afternoon", 15 * 60, 24 * 60),
 )
 
+_CI_STAGES = frozenset(("event", "prod", "dev", "test"))
+
+
+def _ci_base(ci_full: str) -> str:
+    """Strip a known .stage suffix from a catalog item name.
+
+    Labagator stores base names (e.g. rh1-2027.lb1063-foo) while Flow's CSV
+    writes the full staged name (rh1-2027.lb1063-foo.test). Stripping lets
+    either form match the other without requiring callers to agree on stage.
+    """
+    if "." in ci_full:
+        last = ci_full.rsplit(".", 1)[-1]
+        if last in _CI_STAGES:
+            return ci_full[: -(len(last) + 1)]
+    return ci_full
+
 _BAND_BY_KEY = {key: (label, start, end) for key, label, start, end in TIME_BANDS}
 VALID_TIME_BANDS = frozenset(_BAND_BY_KEY)
 VALID_FLOOR = frozenset({"day", "event"})
@@ -129,8 +145,20 @@ def schedule_matches_scope(
 
     want_cis = normalize_ci_names(ci_names)
     if want_cis is not None:
-        name = str(getattr(schedule, "ci_name", None) or "").strip()
-        if name not in want_cis:
+        # Match against all identities for the schedule row:
+        #   ci_name  — human title from CSV ("LB1063: Defend, Contain and Comply")
+        #   ci       — staged catalog slug ("rh1-2027.lb1063-defend-contain-comply.test")
+        #   ci_base  — base slug without stage ("rh1-2027.lb1063-defend-contain-comply")
+        # Labagator stores base names (no .stage); Flow's CSV writes the staged form.
+        # Callers may send either — matching all three forms prevents stage-suffix mismatches.
+        ci_full = str(getattr(schedule, "ci", None) or "").strip()
+        candidates = {
+            str(getattr(schedule, "ci_name", None) or "").strip(),
+            ci_full,
+            _ci_base(ci_full),
+        }
+        candidates.discard("")
+        if not (candidates & want_cis):
             return False
     return True
 
