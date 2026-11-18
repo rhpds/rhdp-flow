@@ -1064,6 +1064,10 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
             # Check for required headers - allow either old or new format
             reader_fieldnames = {h.strip() for h in reader.fieldnames}
             reader_lower = {h.lower() for h in reader_fieldnames}
+            dependency_columns = {'dependency_plan', 'dependency_role', 'dependency_bindings',
+                                  'dependency_run_id', 'parent_child_v1', 'parent_lab_id'}
+            if reader_lower & dependency_columns:
+                raise ValueError('dependency_plan_requires_structured_transport')
             
             # Required core headers (always needed)
             core_required = {'ci name', 'ci', 'namespace', 'users', 
@@ -1096,6 +1100,11 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
             
             # Read rows
             for row_num, row in enumerate(reader, start=2):
+                for column, value in row.items():
+                    if (column or '').strip().lower() in {'item_type', 'lab_type', 'deployment_contract'} and (
+                        str(value).strip().lower() in {'parent_child', 'parent_child_v1', 'dependency_parent', 'dependency_child'}
+                    ):
+                        raise ValueError('dependency_plan_requires_structured_transport')
                 try:
                     # Get values using case-insensitive lookup
                     ci_name = row[header_map.get('ci name', 'CI Name')].strip()

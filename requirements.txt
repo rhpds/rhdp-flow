@@ -8,3 +8,4 @@ sse-starlette==2.2.1
 slowapi==0.1.9
 python-json-logger==4.0.0
 PyYAML==6.0.2
+jsonschema==4.26.0

@@ -534,6 +534,17 @@ def _resolve_target(request: Request, requested: str | None) -> str | None:
     """
     target = identity.effective_target(requested)
     identity.require_picker_access(request, target)
+    dependency_store = getattr(request.app.state, 'dependency_store', None)
+    path = request.url.path.removeprefix('/api/v1').removeprefix('/api')
+    if dependency_store and request.method != 'GET' and (
+        path.startswith('/operations/') or path in {'/deploy', '/deploy/session', '/deploy/retry'}
+    ):
+        # Legacy operations discover Workshops by catalog name. Refuse to let
+        # them select resources still owned by a dependency orchestration run.
+        loaded = {(s.namespace, s.ci) for s in _schedules}
+        if any((p.namespace, n.ci_name) in loaded
+               for p in dependency_store.owned_plans(target) for n in p.nodes):
+            raise HTTPException(409, 'dependency_resources_require_dependency_lifecycle')
     return target
 
 

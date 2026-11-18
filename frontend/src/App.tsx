@@ -43,8 +43,9 @@ const ScheduleEditPage = lazy(() =>
 );
 const DeploymentsTab = lazy(() => import('./components/DeploymentsTab').then(m => ({ default: m.DeploymentsTab })));
 const StudentsTab = lazy(() => import('./components/StudentsTab').then(m => ({ default: m.StudentsTab })));
+const DependencyReview = lazy(() => import('./components/DependencyReview').then(m => ({ default: m.DependencyReview })));
 
-const VALID_TABS = ['upload', 'deployments', 'students'];
+const VALID_TABS = ['upload', 'deployments', 'students', 'dependencies'];
 
 function getTabFromHash(): { tab: string; fromOps: boolean } {
   const hash = window.location.hash.replace('#', '');
@@ -364,6 +365,11 @@ const App: React.FC = () => {
                 <StudentsTab qaResults={qaResults} showToast={showToast} />
               </Suspense>
             </Tab>
+            {!!searchParams.get('dependency_plan') && <Tab eventKey="dependencies" title={<TabTitleText>Parent–Child review</TabTitleText>}>
+              <Suspense fallback={<Spinner />}>
+                <DependencyReview planId={searchParams.get('dependency_plan')!} />
+              </Suspense>
+            </Tab>}
           </Tabs>
         )}
       </PageSection>

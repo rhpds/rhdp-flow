@@ -55,7 +55,12 @@ _shutting_down = False
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    yield
+    from api.dependency_runtime import start, shutdown
+    dependency_runtime = await start(app)
+    try:
+        yield
+    finally:
+        await shutdown(dependency_runtime)
     # Shutdown
     global _shutting_down
     _shutting_down = True
@@ -198,6 +203,11 @@ app.add_middleware(ApiKeyGateMiddleware)
 # ---------------------------------------------------------------------------
 app.include_router(router, prefix="/api")
 app.include_router(router, prefix="/api/v1", tags=["v1"])
+
+from api.dependency_routes import router as dependency_router
+
+app.include_router(dependency_router, prefix="/api")
+app.include_router(dependency_router, prefix="/api/v1", tags=["v1"])
 
 
 # ---------------------------------------------------------------------------
