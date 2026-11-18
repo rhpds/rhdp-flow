@@ -705,6 +705,11 @@ class QAResultItem(BaseModel):
     actual_destroy: str = ""
     showroom_status: str = ""
     showroom_url: str = ""
+    # Which QA stage produced this row ("1", "2", "3", "both", "all") and when.
+    # Results are keyed by (namespace, ci_name, qa_type) so running one stage no
+    # longer wipes the results of another stage or another event.
+    qa_type: str = ""
+    run_at: str = ""
 
     model_config = {"extra": "allow"}
 
