@@ -63,3 +63,19 @@ def test_csv_rejects_dependency_markers(tmp_path):
     path.write_text(lines[0]+',Dependency_Plan\n'+lines[1]+',parent_child_v1\n')
     with pytest.raises(ValueError, match='dependency_plan_requires_structured_transport'):
         read_csv_input(str(path))
+
+
+def test_staging_and_runs_refuse_implicit_default_target(client, plan, monkeypatch):
+    from api import identity
+    monkeypatch.setattr(routes, 'RUNTIME_READY', True)
+    monkeypatch.setattr(identity, 'effective_target', lambda requested: 'events')
+    headers = {'X-API-Key': 'test-key'}
+    payload = plan.model_dump(mode='json')
+    response = client.post('/api/dependency-plans', json=payload, headers=headers)
+    assert response.status_code == 422
+    assert response.json()['detail'] == 'explicit_dependency_target_required'
+    headers['X-RHDP-Target-Cluster'] = 'events'
+    assert client.post('/api/dependency-plans', json=payload, headers=headers).status_code == 200
+    headers.pop('X-RHDP-Target-Cluster')
+    headers['Idempotency-Key'] = 'run-1'
+    assert client.post('/api/dependency-plans/run-1/runs', headers=headers).status_code == 422

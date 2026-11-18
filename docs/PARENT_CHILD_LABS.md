@@ -5,7 +5,7 @@ live resource orders are part of this change. Ordinary CSV keeps its existing
 semantics and rejects dependency markers instead of flattening their graph.
 
 The API and worker use the same immutable plan from staging through deployment.
-The review screen is `/?dependency_plan=<plan-id>#dependencies`. It displays
+The review screen is `/?dependency_plan=<plan-id>&target_cluster=<target>#dependencies`. It displays
 catalog identities, quantities, schedules, and binding sources, masks ordinary
 parameter values, and starts the staged ID with that ID as its idempotency key.
 The plan never includes resolved parent credentials. API-key authentication and
@@ -75,10 +75,12 @@ Cancellation retains existing resources. An explicit failed-child retry cleans
 and verifies exact child claims and handles absent, advances the durable attempt
 and submission token, and preserves the ready parent. Ambiguous submissions and
 partial ownership inventories require attention and cannot be blindly retried.
-Child handle identities are saved before deletion; a missing handle reference,
+Child handle identities are saved during provisioning and before deletion; a missing handle reference,
 replacement UID, or lingering handle holds the parent. Shared parents also wait
-for each registered consumer to release. Successful fully ready runs begin
-child-first teardown at the last child end, releasing expired consumers together.
+for each registered consumer to release. Successful children settle through
+teardown at their individual end times while later children retain the parent.
+At the last successful child end, the run releases expired consumers together
+and completes child-first parent teardown.
 Failed, unknown, and incomplete attempts retain resources and evidence.
 
 Legacy API operations that discover Workshops by catalog name reject schedules

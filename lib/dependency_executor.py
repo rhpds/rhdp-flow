@@ -42,10 +42,31 @@ def _reconcile(store, run_id, adapter, *, now=None):
         def failed(node, code):
             update(node, state='failed', error_code=code)
 
+        def teardown_node(node):
+            record = records[node.key]
+            if not record['workshop_uid']:
+                observed = adapter.observe(plan, node, record)
+                if observed.get('state') == 'absent':
+                    failed(node, 'ambiguous_submission_requires_attention')
+                    return
+                _check_identity(record, observed)
+                update(node, **_identities(observed))
+            # A missing Workshop does not prove its asynchronous handles gone.
+            # Complete durable inventory is mandatory even for absent objects.
+            if hasattr(adapter, 'deletion_inventory'):
+                update(node, **adapter.deletion_inventory(plan, node, record))
+            update(node, state='destroying')
+            if not adapter.absent(plan, node, record):
+                adapter.destroy(plan, node, record)
+            if adapter.absent(plan, node, record):
+                update(node, state='destroyed')
+
         if status['action'] == 'destroy':
             # Cancellation of every unsubmitted node is durable before deletion.
             for node in plan.nodes:
-                if records[node.key]['state'] in {'blocked', 'queued'}:
+                record = records[node.key]
+                if (record['state'] in {'blocked', 'queued', 'cancelled', 'failed'} and
+                    record['deadline'] is None and not record['workshop_uid'] and not record['provision_uid']):
                     update(node, state='destroyed')
             for group in (children, [parent]):
                 if group == [parent] and any(not c['released'] for c in store.status(run_id)['consumers']):
@@ -55,23 +76,7 @@ def _reconcile(store, run_id, adapter, *, now=None):
                     record = records[node.key]
                     if record['state'] == 'destroyed':
                         continue
-                    # Recover potentially accepted writes before trying deletion.
-                    if record['state'] != 'destroying':
-                        observed = adapter.observe(plan, node, record)
-                        if observed.get('state') == 'absent':
-                            if record['workshop_uid'] and adapter.absent(plan, node, record):
-                                update(node, state='destroyed')
-                                continue
-                            failed(node, 'ambiguous_submission_requires_attention')
-                            return
-                        _check_identity(record, observed)
-                        update(node, state='destroying', **_identities(observed))
-                    if hasattr(adapter, 'deletion_inventory'):
-                        inventory = adapter.deletion_inventory(plan, node, records[node.key])
-                        update(node, **inventory)
-                    adapter.destroy(plan, node, records[node.key])
-                    if adapter.absent(plan, node, records[node.key]):
-                        update(node, state='destroyed')
+                    teardown_node(node)
                 if any(records[n.key]['state'] != 'destroyed' for n in group):
                     store.update_run(run_id, owner, 'destroying')
                     return
@@ -86,6 +91,13 @@ def _reconcile(store, run_id, adapter, *, now=None):
 
         if hasattr(adapter, 'parent_lifetime_capability'):
             adapter.parent_lifetime_capability(plan, parent)
+
+        # Successful children can end before later consumers. Settle each at its
+        # own end while holding the parent; incomplete/failed attempts retain
+        # their evidence and never enter this automatic cleanup path.
+        for node in children:
+            if now >= node.auto_destroy and records[node.key]['state'] in {'ready', 'destroying'}:
+                teardown_node(node)
 
         for node in children:
             record = records[node.key]
@@ -103,7 +115,7 @@ def _reconcile(store, run_id, adapter, *, now=None):
         # Observe existing submissions before considering any new orders.
         for node in [parent, *children]:
             record = records[node.key]
-            if record['state'] in {'queued', 'blocked', 'failed', 'cancelled', 'destroyed'}:
+            if record['state'] in {'queued', 'blocked', 'failed', 'cancelled', 'destroyed', 'destroying'}:
                 continue
             observed = adapter.observe(plan, node, record)
             if observed.get('state') == 'absent':
@@ -200,7 +212,7 @@ def _reconcile(store, run_id, adapter, *, now=None):
                 # Raw exceptions can contain child parameter values. Never retain/log them.
                 update(node, error_code='submission_outcome_unknown')
         states = [n['state'] for n in records.values()]
-        result = 'ready' if all(s == 'ready' for s in states) else (
+        result = 'ready' if all(s in {'ready', 'destroyed'} for s in states) else (
             'partial_failure' if 'failed' in states and any(s == 'ready' for s in states)
             else 'failed' if 'failed' in states else 'active')
         store.update_run(run_id, owner, result)

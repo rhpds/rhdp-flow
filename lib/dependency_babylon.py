@@ -218,6 +218,9 @@ class BabylonDependencyAdapter:
         if node.role == 'parent':
             result.update(claim_name=refs[0]['name'], claim_uid=refs[0]['uid'])
             self._parent_claim_hold(claims[0])
+        # Save provenance during provisioning as soon as each handle binds;
+        # readiness must not be the first chance to retain these identities.
+        result.update(self.deletion_inventory(plan, node, {**record, **result}, require_complete=False))
         def ready(claim):
             metadata, state = claim.get('metadata', {}), claim.get('status', {})
             return (not metadata.get('deletionTimestamp') and state.get('ready') is True and
@@ -268,7 +271,7 @@ class BabylonDependencyAdapter:
             'apiVersion': 'v1', 'kind': 'DeleteOptions',
             'preconditions': {'uid': uid}, 'propagationPolicy': 'Foreground'})
 
-    def deletion_inventory(self, plan, node, record):
+    def deletion_inventory(self, plan, node, record, *, require_complete=True):
         claims = {r['uid']: r for r in json.loads(record.get('claim_refs') or '[]')}
         handles = {r['uid']: r for r in json.loads(record.get('handle_refs') or '[]')}
         for claim in self._claims(plan, record):
@@ -276,7 +279,9 @@ class BabylonDependencyAdapter:
             claims[meta['uid']] = {'name': meta['name'], 'uid': meta['uid']}
             reference = claim.get('status', {}).get('resourceHandle') or {}
             if not reference.get('name') or not reference.get('namespace'):
-                raise ValueError('dependency_handle_identity_unconfirmed')
+                if require_complete:
+                    raise ValueError('dependency_handle_identity_unconfirmed')
+                continue
             handle = self._get('resourcehandles.poolboy.gpte.redhat.com',
                                reference['name'], reference['namespace'])
             if not handle:
@@ -288,7 +293,7 @@ class BabylonDependencyAdapter:
                 raise ValueError('dependency_handle_identity_conflict')
             handles[metadata['uid']] = {'name': reference['name'], 'namespace': reference['namespace'],
                                         'uid': metadata['uid']}
-        if len(claims) != node.count or len(handles) != node.count:
+        if require_complete and (len(claims) != node.count or len(handles) != node.count):
             # Partial controller submissions may still acquire handles. Preserve
             # all objects until the complete ownership inventory is confirmed.
             raise ValueError('dependency_teardown_identity_inventory_incomplete')

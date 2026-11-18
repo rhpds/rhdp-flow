@@ -54,6 +54,7 @@ def test_parent_claim_uid_is_verified_and_failed_claim_blocks_readiness(plan, mo
             'status': {'ready': True, 'healthy': True, 'resourceHandle': {'name': 'handle', 'namespace': 'poolboy'}}},
         'resourcehandles.poolboy.gpte.redhat.com': {'metadata': {'uid': 'handle-uid'},
             'spec': {'resourceClaim': {'name': 'claim', 'namespace': 'test-ns'}}},
+        'resourceclaims': {'items': []},
     }
     adapter = BabylonDependencyAdapter(None, command=lambda args, payload=None: objects[args[1]])
     with pytest.raises(ValueError, match='parent_identity_mismatch'):

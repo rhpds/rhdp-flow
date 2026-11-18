@@ -53,10 +53,12 @@ def _adapter(request, target):
 
 def _authorize(request, target):
     from api.routes import _requested_target
-    requested = _requested_target(request)
+    requested = (_requested_target(request) or '').strip()
+    if not requested:
+        raise HTTPException(422, 'explicit_dependency_target_required')
     require_picker_access(request, requested)
     require_picker_access(request, target)
-    if requested and requested != target:
+    if requested != target:
         raise HTTPException(403, 'dependency_target_mismatch')
 
 
@@ -96,7 +98,10 @@ def stage_plan(request: Request, payload: dict):
     except ValidationError as exc:
         raise HTTPException(422, safe_dependency_validation_errors(exc)) from None
     from api.routes import _requested_target, _resolve_target, _validate_namespace
-    target = _resolve_target(request, _requested_target(request))
+    requested = (_requested_target(request) or '').strip()
+    if not requested:
+        raise HTTPException(422, 'explicit_dependency_target_required')
+    target = _resolve_target(request, requested)
     # An immutable explicit target is mandatory; never follow a changing default.
     if not target:
         raise HTTPException(422, 'explicit_dependency_target_required')

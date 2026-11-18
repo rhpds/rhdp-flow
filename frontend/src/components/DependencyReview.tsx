@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type DependencyPlan, type DependencyStatus, getSelectedTarget } from '../services/api';
+import { api, type DependencyPlan, type DependencyStatus, getSelectedTarget, selectTargetCluster } from '../services/api';
 
 /** Review retains only a staged plan identity through Deploy; it never exports CSV. */
 export function DependencyReview({ planId }: { planId: string }) {
@@ -9,6 +9,10 @@ export function DependencyReview({ planId }: { planId: string }) {
   const [status, setStatus] = useState<DependencyStatus>();
   const [busy, setBusy] = useState(false);
   const [targetVersion, setTargetVersion] = useState(0);
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('target_cluster');
+    if (requested && requested !== getSelectedTarget()) selectTargetCluster(requested);
+  }, []);
   useEffect(() => {
     const changed = () => { setPlan(undefined); setStatus(undefined); setTargetVersion(v => v + 1); };
     window.addEventListener('rhdp-target-change', changed);

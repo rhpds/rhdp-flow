@@ -175,3 +175,47 @@ def test_restart_between_workshop_and_provision_recovers_exact_owned_shell(plan,
     reconcile(store, run, adapter, now=NOW)
     assert len(cluster.creates) == 2
     assert store.status(run)['nodes'][0]['state'] == 'provisioning'
+
+
+def test_successful_early_child_expiry_does_not_strand_later_child_or_parent(plan, store):
+    plan.nodes[1].auto_destroy = NOW + timedelta(hours=1)
+    later = plan.nodes[1].model_copy(deep=True)
+    later.key = 'later'
+    later.workshop_name = 'test-later'
+    later.auto_destroy = NOW + timedelta(hours=2)
+    plan.nodes.append(later)
+    adapter = Adapter()
+    adapter.ready = adapter.outputs = True
+    run = start(store, plan)
+    reconcile(store, run, adapter, now=NOW)
+    reconcile(store, run, adapter, now=NOW)
+    reconcile(store, run, adapter, now=NOW)
+    assert store.status(run)['state'] == 'ready'
+    reconcile(store, run, adapter, now=NOW+timedelta(hours=1))
+    assert adapter.removed == ['child']
+    assert 'later' in adapter.objects and 'parent' in adapter.objects
+    assert store.status(run)['state'] == 'ready'
+    for _ in range(3):
+        reconcile(store, run, adapter, now=NOW+timedelta(hours=2))
+    assert adapter.removed == ['child', 'later', 'parent']
+    assert store.status(run)['state'] == 'destroyed'
+
+
+def test_absent_unready_child_with_unrecorded_handle_cannot_release_parent(plan, store, monkeypatch):
+    monkeypatch.setenv('RHDP_DEPENDENCY_POOLBOY_NAMESPACE', 'poolboy')
+    cluster = Cluster(plan)
+    adapter = BabylonDependencyAdapter(None, command=cluster.command)
+    run = start(store, plan)
+    reconcile(store, run, adapter, now=NOW)
+    cluster.ready('parent')
+    reconcile(store, run, adapter, now=NOW)
+    # Child submission was accepted, but no ready observation ever captured its
+    # claim/handle identities. A stale independent handle must hold the parent.
+    cluster.objects.pop(('workshop', 'test-child'))
+    cluster.objects.pop(('workshopprovision', 'test-child'))
+    cluster.objects[('resourcehandle', 'unknown-child')] = {'metadata': {'uid': 'unknown'}}
+    store.request(run, 'destroy')
+    reconcile(store, run, adapter, now=NOW)
+    assert ('workshop', 'test-parent') in cluster.objects
+    assert ('resourcehandle', 'unknown-child') in cluster.objects
+    assert store.status(run)['state'] == 'attention_required'

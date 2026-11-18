@@ -182,3 +182,20 @@ def test_explicit_failed_child_retry_cleans_resources_and_preserves_parent(store
     assert [k for k,p in adapter.created].count('parent') == 1
     assert [k for k,p in adapter.created].count('child') == 2
     assert adapter.removed == ['child']
+
+
+def test_cancel_before_child_start_then_destroy_releases_parent(store, plan):
+    plan.nodes[1].deploy_on = NOW+timedelta(hours=1)
+    run = start(store, plan)
+    adapter = Adapter()
+    adapter.ready = adapter.outputs = True
+    reconcile(store, run, adapter, now=NOW)
+    reconcile(store, run, adapter, now=NOW)
+    store.request(run, 'cancel')
+    reconcile(store, run, adapter, now=NOW)
+    assert store.status(run)['nodes'][1]['state'] == 'cancelled'
+    store.request(run, 'destroy')
+    assert run in store.pending()
+    reconcile(store, run, adapter, now=NOW)
+    assert adapter.removed == ['parent']
+    assert store.status(run)['state'] == 'destroyed'
