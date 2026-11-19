@@ -263,6 +263,18 @@ export const api = {
   getSchedules: () => cachedRequest<WorkshopSchedule[]>('/schedules'),
   validateNamespaces: (targetCluster?: string | null) =>
     request<{ namespaces: Record<string, boolean>; missing: string[] }>(`/schedules/validate-namespaces${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  ensureNamespaces: (opts?: { createMissing?: boolean; targetCluster?: string | null }) => {
+    const params = new URLSearchParams();
+    if (opts?.targetCluster) params.set('target_cluster', opts.targetCluster);
+    if (opts?.createMissing === false) params.set('create_missing', 'false');
+    const qs = params.toString();
+    return request<{
+      namespaces: Record<string, boolean>;
+      missing: string[];
+      created: string[];
+      failed: Array<{ namespace: string; error: string }>;
+    }>(`/schedules/ensure-namespaces${qs ? `?${qs}` : ''}`, { method: 'POST', body: '{}' });
+  },
   validateNumUsers: (targetCluster?: string | null) =>
     request<NumUsersValidationResponse>(`/schedules/validate-num-users${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
   validateParameters: (targetCluster?: string | null) =>

@@ -322,6 +322,8 @@ export const UploadTab: React.FC<Props> = ({
 
   // Namespace validation
   const [missingNamespaces, setMissingNamespaces] = useState<string[]>([]);
+  const [createMissingNamespaces, setCreateMissingNamespaces] = useState(false);
+  const [ensuringNamespaces, setEnsuringNamespaces] = useState(false);
 
   // num_users limit validation
   const [numUsersViolations, setNumUsersViolations] = useState<NumUsersViolation[]>([]);
@@ -603,8 +605,20 @@ export const UploadTab: React.FC<Props> = ({
     setPoolCapacityWarnings([]);
     setPoolsNotFound([]);
     const effectiveTarget = targetCluster || DEFAULT_TARGET_CLUSTER;
+    const nsPromise = createMissingNamespaces
+      ? api.ensureNamespaces({ createMissing: true, targetCluster: effectiveTarget }).then((res) => {
+          if (res.created?.length) {
+            showToast(`Created namespace(s): ${res.created.join(', ')}`, 'success');
+          }
+          if (res.failed?.length) {
+            const detail = res.failed.map((f) => `${f.namespace}: ${f.error}`).join('; ');
+            showToast(`Failed to create namespace(s): ${detail}`, 'danger');
+          }
+          return { namespaces: res.namespaces, missing: res.missing };
+        })
+      : api.validateNamespaces(effectiveTarget);
     const [nsRes, nuRes, cnRes, pcRes, pvRes] = await Promise.all([
-      api.validateNamespaces(effectiveTarget),
+      nsPromise,
       api.validateNumUsers(effectiveTarget),
       api.validateCatalogNamespaces(effectiveTarget),
       api.validatePoolCapacity(),
@@ -691,7 +705,7 @@ export const UploadTab: React.FC<Props> = ({
     if (cnRes.prod_not_event?.length) setProdNotEvent(cnRes.prod_not_event);
     else setProdNotEvent([]);
     return { nsRes, nuRes, cnRes, pcRes, pvRes };
-  }, [onOperatorOverrideRecorded]);
+  }, [onOperatorOverrideRecorded, createMissingNamespaces, targetCluster, showToast]);
 
   const handleValidate = async () => {
     if (schedules.length === 0) {
@@ -2095,9 +2109,49 @@ export const UploadTab: React.FC<Props> = ({
 
           {/* Namespace existence warning */}
           {missingNamespaces.length > 0 && (
-            <Alert variant="danger" isInline title={`${missingNamespaces.length} namespace(s) not found on cluster`} style={{ marginBottom: 12 }}>
+            <Alert
+              variant="danger"
+              isInline
+              title={`${missingNamespaces.length} namespace(s) not found on cluster`}
+              style={{ marginBottom: 12 }}
+              actionLinks={
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  isLoading={ensuringNamespaces}
+                  onClick={async () => {
+                    setEnsuringNamespaces(true);
+                    try {
+                      const effectiveTarget = targetCluster || DEFAULT_TARGET_CLUSTER;
+                      const res = await api.ensureNamespaces({
+                        createMissing: true,
+                        targetCluster: effectiveTarget,
+                      });
+                      if (res.created?.length) {
+                        showToast(`Created namespace(s): ${res.created.join(', ')}`, 'success');
+                      }
+                      if (res.failed?.length) {
+                        const detail = res.failed.map((f) => `${f.namespace}: ${f.error}`).join('; ');
+                        showToast(
+                          `Failed to create namespace(s) (deploy SA needs namespaces/create RBAC): ${detail}`,
+                          'danger',
+                        );
+                      }
+                      setMissingNamespaces(res.missing || []);
+                    } catch (e) {
+                      showToast(`Ensure namespaces failed: ${e}`, 'danger');
+                    } finally {
+                      setEnsuringNamespaces(false);
+                    }
+                  }}
+                >
+                  Create missing namespaces
+                </Button>
+              }
+            >
               The following namespaces do not exist: <strong>{missingNamespaces.join(', ')}</strong>.
-              Deployment will fail unless these are created first.
+              Deployment will fail unless these are created first. Enable “Create missing namespaces”
+              under Deploy Settings to auto-create on validate, or use the button above.
             </Alert>
           )}
 
@@ -3414,6 +3468,16 @@ export const UploadTab: React.FC<Props> = ({
                       label="Use Catalog Lookup"
                       isChecked={useCatalogLookup}
                       onChange={(_e, checked) => setUseCatalogLookup(checked)}
+                    />
+                  </Tooltip>
+                </SplitItem>
+                <SplitItem>
+                  <Tooltip content="When validating, create any missing schedule namespaces (e.g. event-{id}-{DDMMYYYY}). Requires namespaces/create on the deploy ServiceAccount ClusterRole.">
+                    <Switch
+                      id="create-missing-namespaces-switch"
+                      label="Create missing namespaces"
+                      isChecked={createMissingNamespaces}
+                      onChange={(_e, checked) => setCreateMissingNamespaces(checked)}
                     />
                   </Tooltip>
                 </SplitItem>

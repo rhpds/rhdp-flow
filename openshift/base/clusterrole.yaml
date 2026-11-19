@@ -3,10 +3,13 @@ kind: ClusterRole
 metadata:
   name: rhdp-scheduler
 rules:
-  # Read namespaces for validation
+  # Read namespaces for validation; create required for ensure-namespaces
+  # (event-{id}-{DDMMYYYY} and other non-UserNamespace projects). Apply this
+  # ClusterRole update before relying on POST /schedules/ensure-namespaces —
+  # without create, Flow returns Forbidden and leaves missing namespaces failed.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "create"]
   # Manage Babylon workshop resources (deploy creates, operations patch, cleanup deletes).
   # multiworkshops required for multi-asset / Asset_CIs rows (Roadshow, LB1577, etc.).
   - apiGroups: ["babylon.gpte.redhat.com"]

@@ -270,6 +270,8 @@ def _write_qa_csv_for_namespace(
     floor_date: str | None = None,
     time_band: str | None = None,
     ci_names: list[str] | None = None,
+    event_id: str | None = None,
+    session_start: str | None = None,
 ) -> str:
     """Write a temporary CSV containing schedules for one namespace (optional floor day / CI subset)."""
     filtered = filter_schedules_by_scope(
@@ -279,6 +281,8 @@ def _write_qa_csv_for_namespace(
         floor_date=floor_date,
         time_band=time_band,
         ci_names=ci_names,
+        event_id=event_id,
+        session_start=session_start,
     )
     if not filtered:
         scope_bits = [f'namespace "{namespace}"']
@@ -307,6 +311,8 @@ def _write_qa_csv_for_namespace(
         "Auto-stop (UTC)",
         "Auto-destroy (UTC)",
         "Session Date",
+        "Session_Start",
+        "Event_Id",
         "Multi_Asset",
         "Asset_CIs",
         "Multi_Workshop_Name",
@@ -345,6 +351,8 @@ def _write_qa_csv_for_namespace(
                 "Auto-stop (UTC)": s.auto_stop,
                 "Auto-destroy (UTC)": s.auto_destroy,
                 "Session Date": getattr(s, "session_date", "") or "",
+                "Session_Start": getattr(s, "session_start", "") or "",
+                "Event_Id": getattr(s, "event_id", "") or "",
                 "Multi_Asset": s.is_multi_asset,
                 "Asset_CIs": s.asset_cis,
                 "Multi_Workshop_Name": s.multi_workshop_name,
@@ -548,6 +556,18 @@ def _resolve_target(request: Request, requested: str | None) -> str | None:
     return target
 
 
+def _stamp_operator_email(config: RHDPConfig, request: Request | None) -> RHDPConfig:
+    """Prefer the authenticated operator for non-user-* namespace requester stamps."""
+    if request is None:
+        return config
+    from api.identity import get_user_email
+
+    operator = get_user_email(request) or ""
+    if operator and not getattr(config, "default_requester_email", ""):
+        config.default_requester_email = operator
+    return config
+
+
 def _request_config(request: Request):
     """Resolve a request's target without changing process-wide credentials."""
     target = _resolve_target(request, _requested_target(request))
@@ -557,6 +577,7 @@ def _request_config(request: Request):
         raise HTTPException(400, str(exc)) from exc
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(503, "Target credential lookup timed out") from exc
+    _stamp_operator_email(config, request)
     try:
         yield config
     finally:
@@ -613,6 +634,8 @@ def _schedule_to_response(s: WorkshopSchedule) -> WorkshopScheduleResponse:
         workshop_name=s.workshop_name, provisioning_date=s.provisioning_date,
         auto_stop=s.auto_stop, auto_destroy=s.auto_destroy,
         session_date=getattr(s, "session_date", "") or "",
+        session_start=getattr(s, "session_start", "") or "",
+        event_id=getattr(s, "event_id", "") or "",
         is_multi_asset=s.is_multi_asset, asset_cis=s.asset_cis,
         multi_workshop_name=s.multi_workshop_name,
         concurrency=s.concurrency, instances=s.instances,
@@ -1379,31 +1402,103 @@ def get_schedules():
     return [_schedule_to_response(s) for s in _schedules]
 
 
+def _namespace_exists(ns: str, config: RHDPConfig, env: dict[str, str]) -> bool:
+    """Return True when ``oc get namespace`` succeeds for ``ns``."""
+    try:
+        r = subprocess.run(
+            [config.oc_command, "get", "namespace", ns, "-o", "name"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        return r.returncode == 0
+    except Exception as exc:
+        logger.warning("Namespace validation failed for %s: %s", ns, exc)
+        return False
+
+
+def _create_namespace(ns: str, config: RHDPConfig, env: dict[str, str]) -> tuple[bool, str]:
+    """Create a plain Namespace. Returns (ok, error_message).
+
+    Requires ClusterRole ``create`` on ``namespaces`` for the deploy SA
+    (see openshift/base/clusterrole.yaml). Without that RBAC this returns
+    a 403-style error string.
+    """
+    try:
+        r = subprocess.run(
+            [config.oc_command, "create", "namespace", ns],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if r.returncode == 0:
+        return True, ""
+    err = (r.stderr or r.stdout or "").strip()
+    # Race: another worker created it between get and create.
+    if "AlreadyExists" in err:
+        return True, ""
+    return False, err or f"oc create namespace failed (exit {r.returncode})"
+
+
 @router.post("/schedules/validate-namespaces")
 def validate_namespaces(_key=Depends(verify_api_key), config=Depends(_request_config)):
     """Check whether the namespaces referenced by loaded schedules exist on the cluster."""
     if not _schedules:
         raise HTTPException(400, "No schedules loaded.")
-    env = os.environ.copy()
-    if config.kubeconfig_path:
-        env["KUBECONFIG"] = config.kubeconfig_path
+    env = _config_env(config)
 
     unique_ns = {s.namespace for s in _schedules}
     for ns in unique_ns:
         _validate_namespace(ns)
-    results: dict[str, bool] = {}
-    for ns in unique_ns:
-        try:
-            r = subprocess.run(
-                [config.oc_command, "get", "namespace", ns, "-o", "name"],
-                capture_output=True, text=True, timeout=10, env=env,
-            )
-            results[ns] = r.returncode == 0
-        except Exception as exc:
-            logger.warning("Namespace validation failed for %s: %s", ns, exc)
-            results[ns] = False
+    results: dict[str, bool] = {ns: _namespace_exists(ns, config, env) for ns in unique_ns}
     missing = [ns for ns, ok in results.items() if not ok]
     return {"namespaces": results, "missing": missing}
+
+
+@router.post("/schedules/ensure-namespaces")
+def ensure_namespaces(
+    create_missing: bool = True,
+    _key=Depends(verify_api_key),
+    config=Depends(_request_config),
+):
+    """Ensure schedule namespaces exist; optionally create any that are missing.
+
+    Creating namespaces requires ``create`` on ``namespaces`` for the Flow
+    deploy ServiceAccount. Until that ClusterRole verb is applied, missing
+    namespaces will appear under ``failed`` with a Forbidden error.
+    """
+    if not _schedules:
+        raise HTTPException(400, "No schedules loaded.")
+    env = _config_env(config)
+
+    unique_ns = sorted({s.namespace for s in _schedules if s.namespace})
+    for ns in unique_ns:
+        _validate_namespace(ns)
+
+    results: dict[str, bool] = {}
+    created: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    for ns in unique_ns:
+        if _namespace_exists(ns, config, env):
+            results[ns] = True
+            continue
+        if not create_missing:
+            results[ns] = False
+            continue
+        ok, err = _create_namespace(ns, config, env)
+        if ok:
+            results[ns] = True
+            created.append(ns)
+        else:
+            results[ns] = False
+            failed.append({"namespace": ns, "error": err})
+
+    missing = [ns for ns, ok in results.items() if not ok]
+    return {
+        "namespaces": results,
+        "missing": missing,
+        "created": created,
+        "failed": failed,
+    }
 
 
 @router.post("/schedules/validate-num-users", response_model=NumUsersValidationResponse)
@@ -2007,6 +2102,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 redirect=body.redirect,
                 target_cluster=effective_target,
             )
+            _stamp_operator_email(config, request)
             # U3: Propagate showroom deploy settings to schedules
             for s in schedules:
                 if s.showroom_repo:
@@ -2142,6 +2238,7 @@ async def deploy_session(
             redirect=redirect,
             target_cluster=target_cluster,
         )
+        _stamp_operator_email(config, request)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     job = jobs.create_job()
@@ -2219,6 +2316,7 @@ def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key
             redirect=body.redirect,
             target_cluster=target,
         )
+        _stamp_operator_email(config, request)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if body.export_yaml_dir:
@@ -2307,6 +2405,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
                 redirect=body.redirect,
                 target_cluster=target,
             )
+            _stamp_operator_email(config, request)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         config.dry_run_export_yaml_dir = tmpdir
@@ -2664,6 +2763,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
                 redirect=body.redirect,
                 target_cluster=target,
             )
+            _stamp_operator_email(config, request)
             jobs.update_job(job.job_id, status=jobs.Status.running, message=f"Retrying {len(matching)} deployment(s)")
 
             pace = deploy_pace_seconds(len(matching), body.deploy_delay_seconds)
@@ -3012,6 +3112,8 @@ def _run_qa_over(
     floor_date=None,
     time_band=None,
     ci_names=None,
+    event_id=None,
+    session_start=None,
     job_id=None,
 ):
     """Run the selected QA checks across ``namespaces`` and return QAResultItems.
@@ -3022,7 +3124,7 @@ def _run_qa_over(
 
     Operator-facing order: catalog → setup → deploy+Soundcheck. Internal helpers
     keep historical names (qa1=setup, qa2=deploy, qa3=catalog). Floor/time_band/
-    ci_names scope which schedules are QAed (Ops Floor day pin / retry-failed).
+    ci_names/event_id scope which schedules are QAed (Ops Floor day pin / labels).
     """
     temp_csv_paths: list[str] = []
     all_setup: list[dict] = []
@@ -3047,6 +3149,7 @@ def _run_qa_over(
             # Floor day filter matches the Ops Floor pin so multi-day events
             # don't run Catalog→Setup→Healthy against undeployed later days.
             # Optional ci_names = early-deployed subset or retry-failed.
+            # event_id / session_start = Labagator Workshop label filters.
             try:
                 temp_path = _write_qa_csv_for_namespace(
                     ns,
@@ -3054,6 +3157,8 @@ def _run_qa_over(
                     floor_date=floor_date,
                     time_band=time_band,
                     ci_names=ci_names,
+                    event_id=event_id,
+                    session_start=session_start,
                 )
             except HTTPException:
                 # This namespace has no schedules in the current floor/band/CI
@@ -3087,6 +3192,8 @@ def _run_qa_over(
                     floor_date=floor_date,
                     time_band=time_band,
                     ci_names=ci_names,
+                    event_id=event_id,
+                    session_start=session_start,
                 )
                 if s.namespace in namespaces
             ]
@@ -3121,6 +3228,8 @@ def _run_qa_over(
                     floor_date=floor_date,
                     time_band=time_band,
                     ci_names=ci_names,
+                    event_id=event_id,
+                    session_start=session_start,
                 )
                 if s.namespace in namespaces
             ]
@@ -3132,6 +3241,8 @@ def _run_qa_over(
                     floor_date=floor_date,
                     time_band=time_band,
                     ci_names=ci_names,
+                    event_id=event_id,
+                    session_start=session_start,
                 )
                 temp_csv_paths.append(cat_path)
                 all_catalog.extend(qa1_verify_catalog_items_exist(cat_path, config))
@@ -3143,7 +3254,7 @@ def _run_qa_over(
                     "CI Name", "CI", "Namespace", "Users", "Enable_workshop_interface",
                     "Password", "Activity", "Purpose", "Workshop Name",
                     "Provisioning Date (UTC)", "Auto-stop (UTC)", "Auto-destroy (UTC)",
-                    "Session Date",
+                    "Session Date", "Session_Start", "Event_Id",
                 ]
                 with combined:
                     writer = csv.DictWriter(combined, fieldnames=fieldnames)
@@ -3163,6 +3274,8 @@ def _run_qa_over(
                             "Auto-stop (UTC)": s.auto_stop,
                             "Auto-destroy (UTC)": s.auto_destroy,
                             "Session Date": getattr(s, "session_date", "") or "",
+                            "Session_Start": getattr(s, "session_start", "") or "",
+                            "Event_Id": getattr(s, "event_id", "") or "",
                         })
                 temp_csv_paths.append(combined.name)
                 all_catalog.extend(qa1_verify_catalog_items_exist(combined.name, config))
@@ -3196,12 +3309,29 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     Running as a job (instead of one long blocking request) is what lets a
     full 50+ lab QA sweep finish without the HTTP request timing out, and adds
     live progress plus cancellation.
+
+    Ops prefers ``event_id`` (+ optional ``session_date``) over Babylon namespace
+    lists. Those map to schedule/Workshop labels ``labagator.redhat.com/event-id``
+    and ``session-date``; namespaces are derived from matching loaded schedules.
     """
     if not _schedules:
         raise HTTPException(400, "No schedules loaded.")
 
+    from api.services.qa_scope import normalize_event_id, normalize_session_start
+
+    event_id = normalize_event_id(body.event_id)
+    session_start = normalize_session_start(body.session_start)
+    # session_date is the Ops day label filter; also implies floor=day when set.
+    session_date = body.session_date
     floor = body.floor or "event"
     floor_date = body.floor_date
+    if session_date and not floor_date:
+        floor_date = session_date
+        floor = "day"
+    elif session_date and floor == "event":
+        # Explicit day label from Ops wins over a bare event floor mode.
+        floor = "day"
+        floor_date = session_date
     time_band = body.time_band
     ci_names = body.ci_names
     if floor == "day" and not floor_date:
@@ -3214,29 +3344,48 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     # Non-default targets require an authenticated operator.
     target = await asyncio.to_thread(_resolve_target, request, _requested_target(request))
 
-    # Support multiple namespaces for faster targeted QA
+    label_scoped = filter_schedules_by_scope(
+        _schedules,
+        floor=floor,
+        floor_date=floor_date,
+        time_band=time_band,
+        ci_names=ci_names,
+        event_id=event_id,
+        session_start=session_start,
+    )
+
+    # Support multiple namespaces for faster targeted QA. When event_id (and
+    # optional session_date) is provided, derive namespaces from matching
+    # schedules so Ops never has to pick a Babylon namespace.
     if body.namespaces:
         namespaces = body.namespaces
     elif body.namespace:
         # Support comma-separated namespaces in single field for backward compat
         namespaces = [ns.strip() for ns in body.namespace.split(",") if ns.strip()]
+    elif event_id or session_date or session_start:
+        namespaces = list(dict.fromkeys(s.namespace for s in label_scoped if s.namespace))
+        if not namespaces:
+            bits = []
+            if event_id:
+                bits.append(f"event_id={event_id}")
+            if floor_date:
+                bits.append(f"session_date={floor_date}")
+            if session_start:
+                bits.append(f"session_start={session_start}")
+            raise HTTPException(
+                400,
+                "No loaded schedules match " + " · ".join(bits) + ". Load the event CSV/schedules first.",
+            )
     else:
         namespaces = list(dict.fromkeys(s.namespace for s in _schedules))
 
-    # When a CI Name subset is requested, only touch namespaces that still have matches.
-    if ci_names:
-        scoped = filter_schedules_by_scope(
-            _schedules,
-            floor=floor,
-            floor_date=floor_date,
-            time_band=time_band,
-            ci_names=ci_names,
-        )
-        ns_with_matches = {s.namespace for s in scoped if s.namespace in namespaces}
+    # When a CI Name subset / label scope is requested, only touch namespaces that still have matches.
+    if ci_names or event_id or session_date or session_start:
+        ns_with_matches = {s.namespace for s in label_scoped if s.namespace in namespaces}
         if not ns_with_matches:
             raise HTTPException(
                 400,
-                "No loaded schedules match the selected CI names in the current floor/namespace scope.",
+                "No loaded schedules match the selected event/day/CI scope.",
             )
         namespaces = [ns for ns in namespaces if ns in ns_with_matches]
 
@@ -3249,11 +3398,14 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         config = None
         try:
             config = await asyncio.to_thread(_get_config, target_cluster=target)
+            scope_msg = f"event {event_id}" if event_id else f"{len(namespaces)} namespace(s)"
+            if floor == "day" and floor_date:
+                scope_msg = f"{scope_msg} · day {floor_date}"
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.running,
                 progress=2,
-                message=f"Starting QA{qa_type} across {len(namespaces)} namespace(s)",
+                message=f"Starting QA{qa_type} for {scope_msg}",
             )
             new_results = await asyncio.to_thread(
                 _run_qa_over,
@@ -3264,6 +3416,8 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 floor_date=floor_date,
                 time_band=time_band,
                 ci_names=ci_names,
+                event_id=event_id,
+                session_start=session_start,
                 job_id=job.job_id,
             )
             # Coverage metadata: what this run actually QA'd (floor/band/CI subset
@@ -3275,6 +3429,8 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 time_band=time_band,
                 ci_names=ci_names,
                 namespaces=namespaces,
+                event_id=event_id,
+                session_start=session_start,
             )
             # Stamp this run's stage + time so results from different QA stages
             # (or different events/namespaces) can coexist instead of clobbering

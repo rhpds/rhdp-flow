@@ -27,6 +27,8 @@ class WorkshopScheduleResponse(BaseModel):
     auto_stop: str
     auto_destroy: str
     session_date: str = ""
+    session_start: str = ""
+    event_id: str = ""
     is_multi_asset: bool = False
     asset_cis: str = ""
     multi_workshop_name: str = ""
@@ -237,6 +239,27 @@ class QARequest(BaseModel):
         None,
         description="Optional list of namespaces to scan for faster targeted QA",
     )
+    event_id: str | int | None = Field(
+        None,
+        description=(
+            "Labagator event id — scopes QA to schedules/workshops labeled "
+            "labagator.redhat.com/event-id. Prefer this over namespace lists from Ops."
+        ),
+    )
+    session_date: str | None = Field(
+        None,
+        description=(
+            "Optional YYYY-MM-DD Ops floor day (labagator.redhat.com/session-date). "
+            "When set, implies floor=day for that day without requiring a Babylon namespace."
+        ),
+    )
+    session_start: str | None = Field(
+        None,
+        description=(
+            "Optional session start (HH:MM or HHMM UTC) for future session-scoped runs "
+            "(labagator.redhat.com/session-start)."
+        ),
+    )
     floor: Literal["day", "event"] = Field(
         "event",
         description="Ops Floor scope: day = one floor day (Catalog→Setup→Healthy); event = full schedule",
@@ -266,6 +289,33 @@ class QARequest(BaseModel):
         value = value.strip()
         return value or None
 
+    @field_validator("event_id", mode="before")
+    @classmethod
+    def _normalize_event_id(cls, value: str | int | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("session_start")
+    @classmethod
+    def _normalize_session_start(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if len(digits) >= 4:
+            return digits[:4]
+        if ":" in raw:
+            parts = raw.split(":")
+            try:
+                return f"{int(parts[0]):02d}{int(parts[1]):02d}"
+            except (ValueError, IndexError):
+                return raw
+        return raw
+
     @field_validator("ci_names")
     @classmethod
     def _normalize_ci_names(cls, value: list[str] | None) -> list[str] | None:
@@ -275,7 +325,7 @@ class QARequest(BaseModel):
         # Preserve order, drop dupes
         return list(dict.fromkeys(cleaned)) or None
 
-    @field_validator("floor_date")
+    @field_validator("floor_date", "session_date")
     @classmethod
     def _normalize_floor_date(cls, value: str | None) -> str | None:
         if value is None:
@@ -289,7 +339,7 @@ class QARequest(BaseModel):
                 return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
             except ValueError:
                 continue
-        raise ValueError("floor_date must be YYYY-MM-DD")
+        raise ValueError("floor_date/session_date must be YYYY-MM-DD")
 
 
 class DestroyCheckRequest(BaseModel):
