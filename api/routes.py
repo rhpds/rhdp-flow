@@ -98,7 +98,7 @@ from api.services.qa_scope import (
     filter_schedules_by_scope,
     merge_qa_coverage,
 )
-from lib.deploy_pace import deploy_pace_seconds
+from lib.deploy_pace import deploy_concurrency, deploy_pace_seconds
 from rhdp_flow import (
     DeploymentResult,
     RHDPConfig,
@@ -2122,6 +2122,7 @@ async def _run_deploy_over(
     job_id: str,
     asset_passwords: dict[str, str] | None,
     pace_seconds: float = 1.0,
+    concurrency: int = 5,
 ) -> list[DeploymentResult]:
     """Run the deploy loop over an explicit, LOCAL ``schedules`` list.
 
@@ -2132,6 +2133,11 @@ async def _run_deploy_over(
 
     Creates missing ``event-*`` OpenShift projects (ProjectRequest) before any
     Workshop create. Failure to create an event namespace raises and fails the job.
+
+    Independent multi-asset groups and regular schedules run with up to
+    ``concurrency`` in-flight creates (default 5). Multi-asset members within a
+    group stay atomic (one create per group). Cancel stops starting new work;
+    in-flight creates finish.
     """
     if not config.dry_run:
         jobs.update_job(job_id, message="Ensuring event namespaces…")
@@ -2148,60 +2154,75 @@ async def _run_deploy_over(
     results: list[DeploymentResult] = []
     total = len(grouped_multi) + len(regular_schedules)
     done = 0
+    concurrency = max(1, int(concurrency))
+    sem = asyncio.Semaphore(concurrency)
+    progress_lock = asyncio.Lock()
 
-    # Grouped multi-asset
-    for group_name, group_scheds in grouped_multi.items():
+    async def _record(result: DeploymentResult, message: str) -> None:
+        nonlocal done
+        async with progress_lock:
+            results.append(result)
+            done += 1
+            pct = int(done / total * 100) if total else 100
+            jobs.update_job(job_id, progress=pct, message=message)
+            if (
+                concurrency == 1
+                and not config.dry_run
+                and total > 1
+                and done < total
+                and pace_seconds > 0
+            ):
+                await asyncio.sleep(pace_seconds)
+
+    async def _run_multi(group_name: str, group_scheds: list[WorkshopSchedule]) -> None:
         await jobs.wait_if_paused(job_id)
         if jobs.is_cancel_requested(job_id):
-            break
-        # Run sync OpenShift work off the event loop so WebSocket/polling can deliver progress.
-        mw_name = await asyncio.to_thread(
-            create_multi_workshop_from_group, group_scheds, config
-        )
-        first = group_scheds[0]
-        if mw_name:
-            url = f"https://{config.base_domain}/multi-workshop/{first.namespace}/{mw_name}"
-            results.append(DeploymentResult(
-                ci_name=group_name, ci=first.ci, namespace=first.namespace,
-                guid=mw_name, url=url, status="deployed_unverified",
-                provisioning_date=first.provisioning_date,
-                auto_stop=first.auto_stop, auto_destroy=first.auto_destroy,
-                timestamp=utc_timestamp_str(),
-                password=first.password,
-            ))
-        else:
-            results.append(DeploymentResult(
-                ci_name=group_name, ci=first.ci, namespace=first.namespace,
-                guid="failed", url="", status="failed",
-                provisioning_date=first.provisioning_date,
-                auto_stop=first.auto_stop, auto_destroy=first.auto_destroy,
-                timestamp=utc_timestamp_str(),
-                error_message="Failed to create grouped MultiWorkshop",
-                password=first.password,
-            ))
-        done += 1
-        pct = int(done / total * 100) if total else 100
-        jobs.update_job(job_id, progress=pct, message=f"Processed group: {group_name}")
-        if not config.dry_run and total > 1 and done < total:
-            await asyncio.sleep(pace_seconds)
+            return
+        async with sem:
+            if jobs.is_cancel_requested(job_id):
+                return
+            mw_name = await asyncio.to_thread(
+                create_multi_workshop_from_group, group_scheds, config
+            )
+            first = group_scheds[0]
+            if mw_name:
+                url = f"https://{config.base_domain}/multi-workshop/{first.namespace}/{mw_name}"
+                result = DeploymentResult(
+                    ci_name=group_name, ci=first.ci, namespace=first.namespace,
+                    guid=mw_name, url=url, status="deployed_unverified",
+                    provisioning_date=first.provisioning_date,
+                    auto_stop=first.auto_stop, auto_destroy=first.auto_destroy,
+                    timestamp=utc_timestamp_str(),
+                    password=first.password,
+                )
+            else:
+                result = DeploymentResult(
+                    ci_name=group_name, ci=first.ci, namespace=first.namespace,
+                    guid="failed", url="", status="failed",
+                    provisioning_date=first.provisioning_date,
+                    auto_stop=first.auto_stop, auto_destroy=first.auto_destroy,
+                    timestamp=utc_timestamp_str(),
+                    error_message="Failed to create grouped MultiWorkshop",
+                    password=first.password,
+                )
+            await _record(result, f"Processed group: {group_name}")
 
-    for s in regular_schedules:
+    async def _run_regular(s: WorkshopSchedule) -> None:
         await jobs.wait_if_paused(job_id)
         if jobs.is_cancel_requested(job_id):
-            break
-        result = await asyncio.to_thread(
-            process_schedule, s, config, asset_passwords
-        )
-        results.append(result)
-        done += 1
-        pct = int(done / total * 100) if total else 100
-        jobs.update_job(
-            job_id, progress=pct,
-            message=f"Deployed {result.ci_name}: {result.status}",
-        )
-        if not config.dry_run and total > 1 and done < total:
-            await asyncio.sleep(pace_seconds)
+            return
+        async with sem:
+            if jobs.is_cancel_requested(job_id):
+                return
+            result = await asyncio.to_thread(
+                process_schedule, s, config, asset_passwords
+            )
+            await _record(result, f"Deployed {result.ci_name}: {result.status}")
 
+    await asyncio.gather(
+        *(_run_multi(name, scheds) for name, scheds in grouped_multi.items()),
+        *(_run_regular(s) for s in regular_schedules),
+    )
     return results
 
 
@@ -2339,16 +2360,22 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 1 for s in schedules
                 if not (s.multi_workshop_name and s.is_multi_asset)
             )
+            concurrency = deploy_concurrency(body.deploy_concurrency)
             pace = deploy_pace_seconds(total, body.deploy_delay_seconds)
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.running,
-                message=f"Starting deployment ({pace:g}s between workshops)",
+                message=f"Starting deployment (concurrency={concurrency})",
                 progress=1,
             )
             _log_operator_overrides()
             results = await _run_deploy_over(
-                schedules, config, job.job_id, ws.asset_passwords, pace_seconds=pace
+                schedules,
+                config,
+                job.job_id,
+                ws.asset_passwords,
+                pace_seconds=pace,
+                concurrency=concurrency,
             )
 
             with _state_lock:
@@ -2475,16 +2502,22 @@ async def deploy_session(
 
     async def _run():
         try:
+            concurrency = deploy_concurrency(None)
             pace = deploy_pace_seconds(len(schedules), None)
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.running,
-                message=f"Starting deployment ({pace:g}s between workshops)",
+                message=f"Starting deployment (concurrency={concurrency})",
                 progress=1,
             )
             _log_operator_overrides()
             results = await _run_deploy_over(
-                schedules, config, job.job_id, asset_passwords={}, pace_seconds=pace
+                schedules,
+                config,
+                job.job_id,
+                asset_passwords={},
+                pace_seconds=pace,
+                concurrency=concurrency,
             )
             # Mirror results into Flow's global state + persist, so this deploy
             # shows in the Flow dashboard (Deployments tab). ACCUMULATE rather
@@ -3004,20 +3037,38 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
             _stamp_operator_email(config, request)
             jobs.update_job(job.job_id, status=jobs.Status.running, message=f"Retrying {len(matching)} deployment(s)")
 
+            concurrency = deploy_concurrency(body.deploy_concurrency)
             pace = deploy_pace_seconds(len(matching), body.deploy_delay_seconds)
-            results = []
-            for i, s in enumerate(matching):
-                result = await asyncio.to_thread(
-                    process_schedule, s, config, ws.asset_passwords
-                )
-                results.append(result)
-                pct = int((i + 1) / len(matching) * 100)
-                jobs.update_job(
-                    job.job_id, progress=pct,
-                    message=f"Retried {result.ci_name}: {result.status}",
-                )
-                if not config.dry_run and len(matching) > 1 and i + 1 < len(matching):
-                    await asyncio.sleep(pace)
+            results: list[DeploymentResult] = []
+            done = 0
+            sem = asyncio.Semaphore(max(1, concurrency))
+            progress_lock = asyncio.Lock()
+
+            async def _retry_one(s: WorkshopSchedule) -> None:
+                nonlocal done
+                async with sem:
+                    result = await asyncio.to_thread(
+                        process_schedule, s, config, ws.asset_passwords
+                    )
+                    async with progress_lock:
+                        results.append(result)
+                        done += 1
+                        pct = int(done / len(matching) * 100) if matching else 100
+                        jobs.update_job(
+                            job.job_id,
+                            progress=pct,
+                            message=f"Retried {result.ci_name}: {result.status}",
+                        )
+                        if (
+                            concurrency == 1
+                            and not config.dry_run
+                            and len(matching) > 1
+                            and done < len(matching)
+                            and pace > 0
+                        ):
+                            await asyncio.sleep(pace)
+
+            await asyncio.gather(*(_retry_one(s) for s in matching))
 
             # Update global results: replace matching entries, keep the rest
             result_map = {r.ci_name: r for r in results}
