@@ -131,8 +131,17 @@ class DeployRequest(BaseModel):
         ge=0,
         le=60,
         description=(
-            "Pause between workshops during deploy. "
-            "Omit for auto pace: 1s (<10), 3s (10–24), 5s (25+)."
+            "Pause between workshops during serial deploy (concurrency=1). "
+            "Omit for auto pace: 0s (<10), 0.5s (10–24), 1s (25+)."
+        ),
+    )
+    deploy_concurrency: int | None = Field(
+        None,
+        ge=1,
+        le=20,
+        description=(
+            "Max parallel workshop creates during deploy. "
+            "Omit for default 5 (or RHDP_DEPLOY_CONCURRENCY)."
         ),
     )
     export_yaml_dir: str | None = Field(
@@ -202,6 +211,18 @@ class RetryRequest(BaseModel):
     enable_resource_pools: bool = Field(False, description="Enable Poolboy resource pools")
     white_glove: bool = Field(True, description="White-glove mode")
     redirect: bool = Field(True, description="Enable workshop UI redirect")
+    deploy_delay_seconds: float | None = Field(
+        None,
+        ge=0,
+        le=60,
+        description="Pause between workshops when concurrency=1. Omit for auto pace.",
+    )
+    deploy_concurrency: int | None = Field(
+        None,
+        ge=1,
+        le=20,
+        description="Max parallel workshop creates. Omit for default 5.",
+    )
 
 
 class ResultRef(BaseModel):
@@ -739,7 +760,8 @@ class QAResultItem(BaseModel):
     issues: str = ""
     expected_users: int | None = None
     actual_count: int | None = None
-    workshop_users_assigned: int | None = None
+    # QA2 multi-workshop rows use "assigned/total" strings; single workshops use ints.
+    workshop_users_assigned: int | str | None = None
     total_seats: int | None = None
     provisioning_date: str = ""
     auto_stop: str = ""

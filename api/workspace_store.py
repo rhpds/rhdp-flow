@@ -137,6 +137,37 @@ def _ser_qa(item: Any) -> Any:
     return asdict(item) if hasattr(item, "__dataclass_fields__") else item
 
 
+def _de_qa(item: Any) -> Any:
+    """Rehydrate a persisted QA row as QAResultItem (attrs, not bare dict)."""
+    from api.models import QAResultItem
+
+    if isinstance(item, QAResultItem):
+        return item
+    if not isinstance(item, dict):
+        return item
+    data = dict(item)
+    # QA2 multi-workshop rows store "assigned/total" strings; model allows str|int.
+    try:
+        return QAResultItem.model_validate(data)
+    except Exception:  # noqa: BLE001
+        # Drop keys that still fail validation rather than returning a bare dict
+        # (bare dicts break merge code that uses r.namespace).
+        fields = getattr(QAResultItem, "model_fields", {}) or {}
+        filtered = {k: v for k, v in data.items() if k in fields}
+        try:
+            return QAResultItem.model_validate(filtered)
+        except Exception:  # noqa: BLE001
+            return QAResultItem(
+                ci_name=str(data.get("ci_name") or ""),
+                ci=str(data.get("ci") or ""),
+                namespace=str(data.get("namespace") or ""),
+                status=str(data.get("status") or ""),
+                issues=str(data.get("issues") or ""),
+                qa_type=str(data.get("qa_type") or ""),
+                run_at=str(data.get("run_at") or ""),
+            )
+
+
 def load(workspace_id: str | None = None) -> WorkspaceData:
     from rhdp_flow import DeploymentResult, WorkshopSchedule
 
@@ -159,10 +190,11 @@ def load(workspace_id: str | None = None) -> WorkspaceData:
                     asset_passwords[k] = decrypt_str(str(v)) if v else ""
                 except Exception:  # noqa: BLE001
                     asset_passwords[k] = str(v)
+        qa_list = qa_raw if isinstance(qa_raw, list) else []
         return WorkspaceData(
             schedules=[_de_schedule(x, WorkshopSchedule) for x in schedules_raw if isinstance(x, dict)],
             deployment_results=[_de_result(x, DeploymentResult) for x in results_raw if isinstance(x, dict)],
-            qa_results=qa_raw if isinstance(qa_raw, list) else [],
+            qa_results=[_de_qa(x) for x in qa_list],
             destroy_check_results=destroy_raw if isinstance(destroy_raw, list) else [],
             asset_passwords=asset_passwords,
             current_filename=state.current_filename or "",
@@ -314,6 +346,7 @@ def get_archive(session_id: str, workspace_id: str | None = None) -> dict | None
         payload["deployment_results"] = [
             _de_result(x, DeploymentResult) for x in payload.get("deployment_results") or [] if isinstance(x, dict)
         ]
+        payload["qa_results"] = [_de_qa(x) for x in payload.get("qa_results") or []]
         return payload
 
 
