@@ -193,6 +193,228 @@ _cached_base_domain: str | None = None
 # Thread-safe lock for global state mutations (sync endpoints run in threadpool)
 _state_lock = threading.Lock()
 
+_EMOJI_RE = re.compile(r"[✅❌⚠️🔴🟢🟡]+\s*")
+
+# Built-in schedule examples (files under docs/examples/)
+_SCHEDULE_EXAMPLES: dict[str, tuple[str, str]] = {
+    "basic": ("basic_workshop.csv", "Basic workshop"),
+    "full": ("full_featured.csv", "Full featured"),
+    "minimal": ("minimal_workshop.csv", "Minimal"),
+}
+
+
+def _validate_export_yaml_dir(path: str) -> str:
+    """Validate export_yaml_dir to prevent arbitrary filesystem writes.
+
+    Returns resolved safe path or raises HTTPException if invalid.
+    """
+    import tempfile
+    from pathlib import Path
+
+    # Allow only paths under temp directory or a designated 'exports' subdirectory
+    allowed_prefixes = [
+        Path(tempfile.gettempdir()).resolve(),
+        Path.cwd() / "exports",
+        Path.cwd() / "tmp",
+    ]
+
+    try:
+        resolved_path = Path(path).expanduser().resolve()
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {e}")
+
+    # Check if path is under any allowed prefix
+    for allowed in allowed_prefixes:
+        try:
+            resolved_path.relative_to(allowed)
+            return str(resolved_path)
+        except ValueError:
+            continue
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Export path must be under temp directory or exports/tmp subdirectory. Got: {resolved_path}",
+    )
+
+
+def _schedule_examples_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "docs" / "examples"
+
+
+def _write_qa_csv_for_namespace(
+    namespace: str,
+    *,
+    floor: str = "event",
+    floor_date: str | None = None,
+    time_band: str | None = None,
+    ci_names: list[str] | None = None,
+    event_id: str | None = None,
+    session_start: str | None = None,
+) -> str:
+    """Write a temporary CSV containing schedules for one namespace (optional floor day / CI subset)."""
+    filtered = filter_schedules_by_scope(
+        ws.schedules,
+        namespace=namespace,
+        floor=floor,
+        floor_date=floor_date,
+        time_band=time_band,
+        ci_names=ci_names,
+        event_id=event_id,
+        session_start=session_start,
+    )
+    if not filtered:
+        scope_bits = [f'namespace "{namespace}"']
+        if floor == "day" and floor_date:
+            scope_bits.append(f"floor day {floor_date}")
+        if time_band:
+            scope_bits.append(f"band {time_band}")
+        if ci_names:
+            scope_bits.append(f"{len(ci_names)} selected CI name(s)")
+        raise HTTPException(
+            400,
+            f"No loaded schedules match {' · '.join(scope_bits)}.",
+        )
+
+    fieldnames = [
+        "CI Name",
+        "CI",
+        "Namespace",
+        "Users",
+        "Enable_workshop_interface",
+        "Password",
+        "Activity",
+        "Purpose",
+        "Workshop Name",
+        "Provisioning Date (UTC)",
+        "Auto-stop (UTC)",
+        "Auto-destroy (UTC)",
+        "Session Date",
+        "Session_Start",
+        "Event_Id",
+        "Event_Name",
+        "Lab_Code",
+        "Multi_Asset",
+        "Asset_CIs",
+        "Multi_Workshop_Name",
+        "Concurrency",
+        "Instances",
+        "Salesforce IDs",
+        "Salesforce_Type",
+        "Count",
+        "AWS_Region",
+        "Redirect",
+        "Catalog_Namespace",
+        "Showroom_Repo",
+        "Showroom_Ref",
+        "Showroom_NoVNC",
+        "Showroom_Zerotouch",
+        "White_Glove",
+        "Item_Type",
+        "Cluster_CI",
+    ]
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
+    with tmp:
+        writer = csv.DictWriter(tmp, fieldnames=fieldnames)
+        writer.writeheader()
+        for s in filtered:
+            writer.writerow({
+                "CI Name": s.ci_name,
+                "CI": s.ci,
+                "Namespace": s.namespace,
+                "Users": "" if s.users is None else s.users,
+                "Enable_workshop_interface": s.enable_workshop_interface,
+                "Password": s.password,
+                "Activity": s.activity,
+                "Purpose": s.purpose,
+                "Workshop Name": s.workshop_name,
+                "Provisioning Date (UTC)": s.provisioning_date,
+                "Auto-stop (UTC)": s.auto_stop,
+                "Auto-destroy (UTC)": s.auto_destroy,
+                "Session Date": getattr(s, "session_date", "") or "",
+                "Session_Start": getattr(s, "session_start", "") or "",
+                "Event_Id": getattr(s, "event_id", "") or "",
+                "Event_Name": getattr(s, "event_name", "") or "",
+                "Lab_Code": getattr(s, "lab_code", "") or "",
+                "Multi_Asset": s.is_multi_asset,
+                "Asset_CIs": s.asset_cis,
+                "Multi_Workshop_Name": s.multi_workshop_name,
+                "Concurrency": "" if s.concurrency is None else s.concurrency,
+                "Instances": "" if s.instances is None else s.instances,
+                "Salesforce IDs": s.salesforce_ids,
+                "Salesforce_Type": s.salesforce_type,
+                "Count": "" if s.count is None else s.count,
+                "AWS_Region": s.aws_regions,
+                "Redirect": s.redirect,
+                "Catalog_Namespace": s.catalog_namespace,
+                "Showroom_Repo": s.showroom_repo,
+                "Showroom_Ref": s.showroom_ref,
+                "Showroom_NoVNC": s.showroom_novnc,
+                "Showroom_Zerotouch": s.showroom_zerotouch,
+                "White_Glove": s.white_glove,
+                "Item_Type": s.item_type if s.item_type else "",
+                "Cluster_CI": s.cluster_ci_override if s.cluster_ci_override else "",
+            })
+    return tmp.name
+
+
+def _coerce_optional_int(val) -> int | None:
+    if val is None or val == "":
+        return None
+    if isinstance(val, bool):
+        return int(val)
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    try:
+        return int(str(val).strip())
+    except ValueError:
+        return None
+
+
+def _clean_status(raw: str) -> str:
+    """Strip emoji and normalize status string for consistent frontend display."""
+    if not raw:
+        return raw
+    cleaned = _EMOJI_RE.sub("", raw).strip()
+    return cleaned
+
+
+def _normalize_qa_result_dict(r: dict) -> dict:
+    """Align QA1 / QA2 dict keys so QAResultItem and the UI see consistent fields."""
+    out = dict(r)
+
+    # --- status: strip emoji for clean UI display ---
+    if out.get("status"):
+        out["status"] = _clean_status(str(out["status"]))
+
+    # --- expected_users: QA1 uses expected_users, QA2 uses expected_seats ---
+    eu = out.get("expected_users")
+    if eu in (None, ""):
+        es = out.get("expected_seats")
+        out["expected_users"] = _coerce_optional_int(es) if es not in (None, "") else None
+    elif not isinstance(eu, int):
+        out["expected_users"] = _coerce_optional_int(eu)
+
+    # --- actual_count: QA1 uses actual_users or actual_count, QA2 uses actual_seats ---
+    ac = out.get("actual_count")
+    if ac is None or ac == "":
+        found = False
+        for key in ("actual_seats", "actual_users"):
+            raw = out.get(key)
+            if raw is not None and raw != "":
+                out["actual_count"] = _coerce_optional_int(raw)
+                found = True
+                break
+        if not found:
+            out["actual_count"] = None
+
+    # --- deployed: derive from provisioned if missing ---
+    if not out.get("deployed") and out.get("provisioned") is not None:
+        out["deployed"] = "Yes" if out.get("provisioned") else "No"
+
+    return out
+
 
 def _rate_limit(limit_string: str):
     """Apply per-route rate limit if slowapi is available, otherwise no-op."""

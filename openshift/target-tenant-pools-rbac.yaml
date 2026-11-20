@@ -21,9 +21,14 @@ roleRef:
   kind: Role
   name: rhdp-flow-tenant-pools
 subjects:
+  # Preferred deployer SA (when Flow uses a dedicated target kubeconfig).
   - kind: ServiceAccount
     name: rhdp-flow-deployer
     namespace: rhdp-flow
+  # flow-dev currently mounts gpte/opentlc-mgr for Babylon west operations.
+  - kind: ServiceAccount
+    name: opentlc-mgr
+    namespace: gpte
 ---
 # Capacity checks count existing Poolboy ResourceClaims across the target
 # cluster.  Keep this read-only and cluster-scoped because the query uses the
@@ -50,3 +55,6 @@ subjects:
   - kind: ServiceAccount
     name: rhdp-flow-deployer
     namespace: rhdp-flow
+  - kind: ServiceAccount
+    name: opentlc-mgr
+    namespace: gpte
