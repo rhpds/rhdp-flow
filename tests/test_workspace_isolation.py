@@ -102,3 +102,37 @@ def test_passwords_round_trip_encrypted():
     update(mut, "event-sec")
     loaded = load("event-sec").schedules[0]
     assert loaded.password == "secret"
+
+
+def test_qa_results_reload_as_objects_not_dicts():
+    """QA merge uses r.namespace; bare dicts from JSON must be rehydrated."""
+    from api.models import QAResultItem
+
+    def mut(data):
+        data.qa_results = [
+            QAResultItem(
+                ci_name="Lab A",
+                ci="lab-a.prod",
+                namespace="event-42",
+                status="pass",
+                qa_type="1",
+            ),
+            {
+                "ci_name": "Lab B",
+                "ci": "lab-b.prod",
+                "namespace": "event-42",
+                "status": "pass",
+                "qa_type": "1",
+                "workshop_users_assigned": "3/10",
+            },
+        ]
+
+    update(mut, "event-qa")
+    loaded = load("event-qa").qa_results
+    assert len(loaded) == 2
+    assert all(hasattr(r, "namespace") for r in loaded)
+    assert loaded[0].namespace == "event-42"
+    assert loaded[1].workshop_users_assigned == "3/10"
+    # Attribute access used by QA2 merge after QA1 persisted
+    keys = {(r.namespace, r.ci_name, getattr(r, "qa_type", "")) for r in loaded}
+    assert ("event-42", "Lab A", "1") in keys

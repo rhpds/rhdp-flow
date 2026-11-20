@@ -760,7 +760,8 @@ class QAResultItem(BaseModel):
     issues: str = ""
     expected_users: int | None = None
     actual_count: int | None = None
-    workshop_users_assigned: int | None = None
+    # QA2 multi-workshop rows use "assigned/total" strings; single workshops use ints.
+    workshop_users_assigned: int | str | None = None
     total_seats: int | None = None
     provisioning_date: str = ""
     auto_stop: str = ""
