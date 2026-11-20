@@ -379,6 +379,7 @@ class JobResponse(BaseModel):
     results: list[DeploymentResultResponse] | None = None
     error: str | None = None
     log_file: str | None = None
+    workspace_id: str | None = None
 
 
 class WorkshopStateResponse(BaseModel):

@@ -7,6 +7,7 @@ metadata:
       [{"from":{"kind":"ImageStreamTag","name":"rhdp-scheduler:latest"},
         "fieldPath":"spec.template.spec.containers[?(@.name==\"rhdp-scheduler\")].image"}]
 spec:
+  # Multi-replica safe once RHDP_DATABASE_URL points at shared Postgres
   replicas: 1
   selector:
     matchLabels:
@@ -15,6 +16,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: rhdp-scheduler
+        app.kubernetes.io/component: api
     spec:
       serviceAccountName: rhdp-scheduler
       terminationGracePeriodSeconds: 30
@@ -35,6 +37,8 @@ spec:
                 #   LABAGATOR_INTERNAL_API_KEY — shared secret for QA1 Confluence write-back;
                 #                               must match internal_api_key in Labagator's
                 #                               labagator-flow Secret (ansible/vars/*.yml)
+                #   RHDP_DATABASE_URL        — postgresql+psycopg://... (optional; falls back to SQLite)
+                #   RHDP_FERNET_KEY          — Fernet key for encrypted workspace secrets
                 name: rhdp-flow-api
           env:
             - name: KUBECONFIG
@@ -44,6 +48,8 @@ spec:
             # Schedules + results survive ImageStream rollouts (mounted PVC).
             - name: RHDP_FLOW_DATA_DIR
               value: "/app/data"
+            # Prefer RHDP_DATABASE_URL / RHDP_FERNET_KEY from rhdp-flow-api secret
+            # (Postgres). When unset, api/db.py falls back to local SQLite.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -1,0 +1,98 @@
+# Durable Flow workspace database (Postgres).
+# Password comes from Secret rhdp-flow-db (RHDP_DB_PASSWORD).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rhdp-flow-db
+type: Opaque
+stringData:
+  POSTGRES_USER: rhdpflow
+  POSTGRES_DB: rhdpflow
+  # Overwritten at deploy time with a real password (do not leave CHANGE_ME in live).
+  RHDP_DB_PASSWORD: "CHANGE_ME"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhdp-flow-postgres
+  labels:
+    app.kubernetes.io/name: rhdp-flow-postgres
+    app.kubernetes.io/component: postgres
+spec:
+  selector:
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rhdp-flow-postgres
+  labels:
+    app.kubernetes.io/name: rhdp-flow-postgres
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: rhdp-flow-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rhdp-flow-postgres
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rhdp-flow-db
+                  key: POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: rhdp-flow-db
+                  key: POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rhdp-flow-db
+                  key: RHDP_DB_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 1Gi
+              cpu: "1"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "rhdpflow", "-d", "rhdpflow"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "rhdpflow", "-d", "rhdpflow"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

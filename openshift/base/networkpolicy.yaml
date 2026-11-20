@@ -6,6 +6,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: rhdp-scheduler
+      app.kubernetes.io/component: api
   policyTypes:
     - Ingress
   ingress:
@@ -23,3 +24,21 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+---
+# Postgres must not share the API NetworkPolicy (port 8000 only).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rhdp-flow-postgres
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432

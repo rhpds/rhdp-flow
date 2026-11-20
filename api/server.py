@@ -54,17 +54,21 @@ _shutting_down = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — durable workspace DB + interrupt leftover jobs + dependency runtime
+    from api.db import init_db
     from api.dependency_runtime import start, shutdown
+    from api.jobs import interrupt_nonterminal_jobs
+
+    init_db()
+    interrupt_nonterminal_jobs()
     dependency_runtime = await start(app)
     try:
         yield
     finally:
         await shutdown(dependency_runtime)
-    # Shutdown
-    global _shutting_down
-    _shutting_down = True
-    logger.info("RHDP-Flow API shutting down gracefully")
+        global _shutting_down
+        _shutting_down = True
+        logger.info("RHDP-Flow API shutting down gracefully")
 
 
 app = FastAPI(
@@ -154,6 +158,43 @@ class CSPMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(CSPMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Workspace context — every request binds X-RHDP-Workspace / ?workspace=
+# ---------------------------------------------------------------------------
+class WorkspaceMiddleware(BaseHTTPMiddleware):
+    # Probes must not touch workspace tables / ensure_workspace.
+    _EXEMPT = {"/api/health", "/api/v1/health", "/api/healthz", "/api/v1/healthz"}
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        from fastapi import HTTPException
+
+        from api.workspace_store import (
+            current_workspace_id,
+            ensure_workspace,
+            validate_workspace_id,
+        )
+
+        if request.url.path in self._EXEMPT:
+            return await call_next(request)
+
+        raw = request.headers.get("X-RHDP-Workspace") or request.query_params.get("workspace")
+        try:
+            wid = validate_workspace_id(raw)
+            ensure_workspace(wid)
+            token = current_workspace_id.set(wid)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        try:
+            response = await call_next(request)
+            response.headers["X-RHDP-Workspace"] = wid
+            return response
+        finally:
+            current_workspace_id.reset(token)
+
+
+app.add_middleware(WorkspaceMiddleware)
 
 
 # ---------------------------------------------------------------------------

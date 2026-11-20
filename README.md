@@ -1,5 +1,8 @@
 # RHDP-Flow: Red Hat Demo Platform Workshop Automation Tool
 
+Canonical Flow tree for Labagator (`FLOW_API_URL` → `rhdp-flow-dev`). Do not
+maintain a parallel checkout under `rhpds-utils/RHDP-Scheduler` for Flow edits.
+
 Automates scheduling, deployment, and lifecycle management for RHDP workshops — with built-in safety features to prevent costly mistakes. **Flow** = smooth, automated flow from schedule → deploy → ops.
 
 ## Quick Start

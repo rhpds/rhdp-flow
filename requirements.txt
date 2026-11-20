@@ -9,3 +9,6 @@ slowapi==0.1.9
 python-json-logger==4.0.0
 PyYAML==6.0.2
 jsonschema==4.26.0
+SQLAlchemy>=2.0.36
+psycopg[binary]>=3.2.3
+cryptography>=44.0.0
