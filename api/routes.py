@@ -313,6 +313,8 @@ def _write_qa_csv_for_namespace(
         "Session Date",
         "Session_Start",
         "Event_Id",
+        "Event_Name",
+        "Lab_Code",
         "Multi_Asset",
         "Asset_CIs",
         "Multi_Workshop_Name",
@@ -353,6 +355,8 @@ def _write_qa_csv_for_namespace(
                 "Session Date": getattr(s, "session_date", "") or "",
                 "Session_Start": getattr(s, "session_start", "") or "",
                 "Event_Id": getattr(s, "event_id", "") or "",
+                "Event_Name": getattr(s, "event_name", "") or "",
+                "Lab_Code": getattr(s, "lab_code", "") or "",
                 "Multi_Asset": s.is_multi_asset,
                 "Asset_CIs": s.asset_cis,
                 "Multi_Workshop_Name": s.multi_workshop_name,
@@ -1415,27 +1419,199 @@ def _namespace_exists(ns: str, config: RHDPConfig, env: dict[str, str]) -> bool:
         return False
 
 
-def _create_namespace(ns: str, config: RHDPConfig, env: dict[str, str]) -> tuple[bool, str]:
-    """Create a plain Namespace. Returns (ok, error_message).
+# Babylon UserNamespace operator links namespaces via this label. Event session
+# blocks are not real users — Aleix confirmed a sentinel value is fine.
+EVENT_USER_UID_LABEL = "usernamespace.gpte.redhat.com/user-uid"
+EVENT_USER_UID_VALUE = "EVENT"
+OPENSHIFT_DISPLAY_NAME_ANN = "openshift.io/display-name"
 
-    Requires ClusterRole ``create`` on ``namespaces`` for the deploy SA
-    (see openshift/base/clusterrole.yaml). Without that RBAC this returns
-    a 403-style error string.
-    """
+
+def _yaml_double_quoted(value: str) -> str:
+    """Escape a string for a double-quoted YAML scalar."""
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+    )
+
+
+def _format_session_date_display(session_date: str | None) -> str:
+    """YYYY-MM-DD → DD/MM/YYYY; leave other non-empty values as-is."""
+    text = str(session_date or "").strip()
+    if not text:
+        return ""
+    day = text[:10]
+    if len(day) == 10 and day[4] == "-" and day[7] == "-":
+        y, m, d = day.split("-", 2)
+        if y.isdigit() and m.isdigit() and d.isdigit():
+            return f"{d}/{m}/{y}"
+    return text
+
+
+def _format_session_start_display(session_start: str | None) -> str:
+    """Normalize start to HH:MM for the project dropdown display-name."""
+    text = str(session_start or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        parts = text.split(":")
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            return text[:5]
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return text[:5]
+    digits = "".join(c for c in text if c.isdigit())
+    if len(digits) >= 4:
+        hour = int(digits[:2])
+        minute = int(digits[2:4])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    return text
+
+
+def _session_block_display_name(
+    event_name: str | None,
+    session_date: str | None,
+    session_start: str | None,
+    ns: str,
+) -> str:
+    """Dropdown label: ``<Event name> — <DD/MM/YYYY> <HH:MM>``."""
+    name = (event_name or "").strip() or "Labagator event"
+    day = _format_session_date_display(session_date)
+    start = _format_session_start_display(session_start)
+    if day and start:
+        return f"{name} — {day} {start}"
+    if day:
+        return f"{name} — {day}"
+    if start:
+        return f"{name} — {start}"
+    return f"{name} ({ns})"
+
+
+def _ns_meta_from_schedules(ns: str) -> tuple[str, str, str]:
+    """Pick event_name / session_date / session_start for a namespace from loaded schedules."""
+    event_name = ""
+    session_date = ""
+    session_start = ""
+    for s in _schedules:
+        if (getattr(s, "namespace", "") or "") != ns:
+            continue
+        if not event_name:
+            event_name = str(getattr(s, "event_name", "") or "").strip()
+        if not session_date:
+            session_date = str(getattr(s, "session_date", "") or "").strip()
+        if not session_start:
+            session_start = str(getattr(s, "session_start", "") or "").strip()
+        if event_name and session_date and session_start:
+            break
+    return event_name, session_date, session_start
+
+
+def _stamp_event_namespace(
+    ns: str,
+    config: RHDPConfig,
+    env: dict[str, str],
+    *,
+    display_name: str,
+) -> None:
+    """Best-effort user-uid=EVENT label + openshift.io/display-name annotation."""
     try:
-        r = subprocess.run(
-            [config.oc_command, "create", "namespace", ns],
-            capture_output=True, text=True, timeout=30, env=env,
+        subprocess.run(
+            [
+                config.oc_command,
+                "label",
+                "namespace",
+                ns,
+                f"{EVENT_USER_UID_LABEL}={EVENT_USER_UID_VALUE}",
+                "--overwrite",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
         )
+    except Exception as exc:
+        logger.warning("Failed to stamp %s on %s: %s", EVENT_USER_UID_LABEL, ns, exc)
+    try:
+        subprocess.run(
+            [
+                config.oc_command,
+                "annotate",
+                "namespace",
+                ns,
+                f"{OPENSHIFT_DISPLAY_NAME_ANN}={display_name}",
+                "--overwrite",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except Exception as exc:
+        logger.warning("Failed to annotate display-name on %s: %s", ns, exc)
+
+
+def _create_namespace(
+    ns: str,
+    config: RHDPConfig,
+    env: dict[str, str],
+    *,
+    display_name: str | None = None,
+) -> tuple[bool, str]:
+    """Create an OpenShift Project via ProjectRequest. Returns (ok, error_message).
+
+    Uses ``oc create`` of ``project.openshift.io/v1`` ProjectRequest (not a bare
+    Namespace) so SCC/requester annotations match Babylon's project model.
+    Stamps ``usernamespace.gpte.redhat.com/user-uid=EVENT`` and sets
+    ``openshift.io/display-name`` (event name — date start) for the catalog UI.
+    Requires ClusterRole ``create`` on ``projectrequests`` for the deploy SA
+    (see openshift/base/clusterrole.yaml).
+    """
+    import tempfile
+
+    shown = (display_name or "").strip() or f"Labagator session block {ns}"
+    shown_q = _yaml_double_quoted(shown)
+    desc_q = _yaml_double_quoted(f"Flow-created session-block project {ns}")
+    manifest = (
+        "apiVersion: project.openshift.io/v1\n"
+        "kind: ProjectRequest\n"
+        "metadata:\n"
+        f"  name: {ns}\n"
+        "  labels:\n"
+        f"    {EVENT_USER_UID_LABEL}: \"{EVENT_USER_UID_VALUE}\"\n"
+        f'displayName: "{shown_q}"\n'
+        f'description: "{desc_q}"\n'
+    )
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+            fh.write(manifest)
+            path = fh.name
+        try:
+            r = subprocess.run(
+                [config.oc_command, "create", "-f", path],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+        finally:
+            try:
+                import os
+                os.unlink(path)
+            except OSError:
+                pass
     except Exception as exc:
         return False, str(exc)
     if r.returncode == 0:
+        _stamp_event_namespace(ns, config, env, display_name=shown)
         return True, ""
     err = (r.stderr or r.stdout or "").strip()
     # Race: another worker created it between get and create.
-    if "AlreadyExists" in err:
+    if "AlreadyExists" in err or "already exists" in err.lower():
+        _stamp_event_namespace(ns, config, env, display_name=shown)
         return True, ""
-    return False, err or f"oc create namespace failed (exit {r.returncode})"
+    return False, err or f"oc create ProjectRequest failed (exit {r.returncode})"
 
 
 @router.post("/schedules/validate-namespaces")
@@ -1461,9 +1637,9 @@ def ensure_namespaces(
 ):
     """Ensure schedule namespaces exist; optionally create any that are missing.
 
-    Creating namespaces requires ``create`` on ``namespaces`` for the Flow
-    deploy ServiceAccount. Until that ClusterRole verb is applied, missing
-    namespaces will appear under ``failed`` with a Forbidden error.
+    Event session-block projects are created via ProjectRequest and stamped with
+    ``usernamespace.gpte.redhat.com/user-uid=EVENT`` plus an
+    ``openshift.io/display-name`` of ``<event> — <date> <start>``.
     """
     if not _schedules:
         raise HTTPException(400, "No schedules loaded.")
@@ -1478,13 +1654,17 @@ def ensure_namespaces(
     failed: list[dict[str, str]] = []
 
     for ns in unique_ns:
+        event_name, session_date, session_start = _ns_meta_from_schedules(ns)
+        display_name = _session_block_display_name(event_name, session_date, session_start, ns)
         if _namespace_exists(ns, config, env):
             results[ns] = True
+            if str(ns).startswith("event-"):
+                _stamp_event_namespace(ns, config, env, display_name=display_name)
             continue
         if not create_missing:
             results[ns] = False
             continue
-        ok, err = _create_namespace(ns, config, env)
+        ok, err = _create_namespace(ns, config, env, display_name=display_name)
         if ok:
             results[ns] = True
             created.append(ns)
@@ -3254,7 +3434,7 @@ def _run_qa_over(
                     "CI Name", "CI", "Namespace", "Users", "Enable_workshop_interface",
                     "Password", "Activity", "Purpose", "Workshop Name",
                     "Provisioning Date (UTC)", "Auto-stop (UTC)", "Auto-destroy (UTC)",
-                    "Session Date", "Session_Start", "Event_Id",
+                    "Session Date", "Session_Start", "Event_Id", "Event_Name", "Lab_Code",
                 ]
                 with combined:
                     writer = csv.DictWriter(combined, fieldnames=fieldnames)
@@ -3276,6 +3456,8 @@ def _run_qa_over(
                             "Session Date": getattr(s, "session_date", "") or "",
                             "Session_Start": getattr(s, "session_start", "") or "",
                             "Event_Id": getattr(s, "event_id", "") or "",
+                            "Event_Name": getattr(s, "event_name", "") or "",
+                            "Lab_Code": getattr(s, "lab_code", "") or "",
                         })
                 temp_csv_paths.append(combined.name)
                 all_catalog.extend(qa1_verify_catalog_items_exist(combined.name, config))
@@ -3313,10 +3495,15 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     Ops prefers ``event_id`` (+ optional ``session_date``) over Babylon namespace
     lists. Those map to schedule/Workshop labels ``labagator.redhat.com/event-id``
     and ``session-date``; namespaces are derived from matching loaded schedules.
+    When nothing matches, Flow auto-loads from Labagator (or discovers labeled
+    Workshops on the cluster) so Ops QA does not depend on a prior CSV upload.
     """
-    if not _schedules:
-        raise HTTPException(400, "No schedules loaded.")
+    global _schedules, _current_filename
 
+    from api.services.qa_schedule_resolve import (
+        ensure_label_scoped_schedules,
+        qa_scope_error_message,
+    )
     from api.services.qa_scope import normalize_event_id, normalize_session_start
 
     event_id = normalize_event_id(body.event_id)
@@ -3337,6 +3524,10 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     if floor == "day" and not floor_date:
         raise HTTPException(400, "floor_date is required when floor=day (Ops Floor day pin).")
 
+    label_scoped_request = bool(event_id or session_date or session_start)
+    if not _schedules and not label_scoped_request:
+        raise HTTPException(400, "No schedules loaded.")
+
     # Resolve the effective target, but defer credential setup to the background
     # task so the temp kubeconfig is not cleaned up when this request returns.
     # Like deploy, QA falls back to the default cluster (events) when nothing is
@@ -3353,6 +3544,26 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         event_id=event_id,
         session_start=session_start,
     )
+    if label_scoped_request and not label_scoped:
+        prior_len = len(_schedules)
+        updated, label_scoped = await asyncio.to_thread(
+            ensure_label_scoped_schedules,
+            list(_schedules),
+            event_id=event_id,
+            floor=floor,
+            floor_date=floor_date,
+            time_band=time_band,
+            ci_names=ci_names,
+            session_start=session_start,
+            get_config=lambda: _get_config(target_cluster=target),
+        )
+        # Persist auto-loaded / discovered rows so subsequent QA / UI see them.
+        if label_scoped or len(updated) != prior_len:
+            with _state_lock:
+                _schedules = updated
+                if not _current_filename:
+                    _current_filename = f"qa-auto-event-{event_id or 'unknown'}.csv"
+                _save_schedules()
 
     # Support multiple namespaces for faster targeted QA. When event_id (and
     # optional session_date) is provided, derive namespaces from matching
@@ -3365,16 +3576,13 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     elif event_id or session_date or session_start:
         namespaces = list(dict.fromkeys(s.namespace for s in label_scoped if s.namespace))
         if not namespaces:
-            bits = []
-            if event_id:
-                bits.append(f"event_id={event_id}")
-            if floor_date:
-                bits.append(f"session_date={floor_date}")
-            if session_start:
-                bits.append(f"session_start={session_start}")
             raise HTTPException(
                 400,
-                "No loaded schedules match " + " · ".join(bits) + ". Load the event CSV/schedules first.",
+                qa_scope_error_message(
+                    event_id=event_id,
+                    session_date=floor_date,
+                    session_start=session_start,
+                ),
             )
     else:
         namespaces = list(dict.fromkeys(s.namespace for s in _schedules))
@@ -3385,7 +3593,11 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         if not ns_with_matches:
             raise HTTPException(
                 400,
-                "No loaded schedules match the selected event/day/CI scope.",
+                qa_scope_error_message(
+                    event_id=event_id,
+                    session_date=floor_date,
+                    session_start=session_start,
+                ),
             )
         namespaces = [ns for ns in namespaces if ns in ns_with_matches]
 

@@ -184,6 +184,7 @@ def _workshop_provision_parameters(param_values: dict, resourceclaim_payload: di
 LABAGATOR_EVENT_ID_LABEL = "labagator.redhat.com/event-id"
 LABAGATOR_SESSION_DATE_LABEL = "labagator.redhat.com/session-date"
 LABAGATOR_SESSION_START_LABEL = "labagator.redhat.com/session-start"
+LABAGATOR_LAB_CODE_LABEL = "labagator.redhat.com/lab-code"
 
 
 def _normalize_session_start_hhmm(value: str | None) -> str:
@@ -231,24 +232,36 @@ def _stamp_labagator_session_labels(
         labels[LABAGATOR_SESSION_START_LABEL] = start_val
 
 
+def _stamp_labagator_lab_code(labels: dict, lab_code: str | None) -> None:
+    """Set labagator.redhat.com/lab-code when lab_code is set."""
+    if not lab_code:
+        return
+    value = str(lab_code).strip()
+    if value:
+        labels[LABAGATOR_LAB_CODE_LABEL] = value
+
+
 def _stamp_labagator_labels(
     labels: dict,
     *,
     event_id: str | None = None,
     session_date: str | None = None,
     session_start: str | None = None,
+    lab_code: str | None = None,
 ) -> None:
     """Stamp all Labagator Ops isolation labels onto a metadata.labels dict."""
     _stamp_labagator_event_id(labels, event_id)
     _stamp_labagator_session_labels(labels, session_date=session_date, session_start=session_start)
+    _stamp_labagator_lab_code(labels, lab_code)
 
 
 def _copy_labagator_event_id_label(src_labels: dict, dest_labels: dict) -> None:
-    """Copy Labagator event-id + session labels from one labels map to another."""
+    """Copy Labagator event-id + session + lab-code labels from one labels map to another."""
     for key in (
         LABAGATOR_EVENT_ID_LABEL,
         LABAGATOR_SESSION_DATE_LABEL,
         LABAGATOR_SESSION_START_LABEL,
+        LABAGATOR_LAB_CODE_LABEL,
     ):
         val = (src_labels or {}).get(key)
         if val:
@@ -272,6 +285,8 @@ class WorkshopSchedule:
     session_date: str = ""  # Optional Ops Floor day (YYYY-MM-DD); aliases: Session Date, Floor Date
     session_start: str = ""  # Session start HH:MM or HHMM UTC → labagator.redhat.com/session-start (HHMM)
     event_id: str = ""  # Labagator event id → metadata.labels[labagator.redhat.com/event-id]
+    event_name: str = ""  # Labagator event display name → Project openshift.io/display-name
+    lab_code: str = ""  # Session/container lab code → metadata.labels[labagator.redhat.com/lab-code]
     is_multi_asset: bool = False  # True if this is a multi-asset workshop
     asset_cis: str = ""  # Comma-separated list of catalog items for multi-asset workshops (e.g., "ci1,ci2,ci3")
     multi_workshop_name: str = ""  # Optional custom name for multi-asset workshop (e.g., "automation-test" or "test-qvvdw")
@@ -1301,6 +1316,28 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
                         if eid_key in header_map:
                             event_id = row.get(header_map[eid_key], "").strip()
                             break
+
+                    event_name = ""
+                    for en_key in (
+                        "event_name",
+                        "event name",
+                        "labagator_event_name",
+                        "labagator event name",
+                    ):
+                        if en_key in header_map:
+                            event_name = row.get(header_map[en_key], "").strip()
+                            break
+
+                    lab_code = ""
+                    for lc_key in (
+                        "lab_code",
+                        "lab code",
+                        "labagator_lab_code",
+                        "labagator lab code",
+                    ):
+                        if lc_key in header_map:
+                            lab_code = row.get(header_map[lc_key], "").strip()
+                            break
                     # Validate required fields
                     if not all([ci_name, ci, namespace]):
                         logger.warning(f"Row {row_num}: Skipping incomplete record")
@@ -1365,6 +1402,8 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
                         session_date=session_date,
                         session_start=session_start,
                         event_id=event_id,
+                        event_name=event_name,
+                        lab_code=lab_code,
                         is_multi_asset=is_multi_asset,
                         asset_cis=asset_cis,
                         multi_workshop_name=multi_workshop_name,
@@ -1794,6 +1833,7 @@ def build_resource_claim_payload(
         event_id=getattr(schedule, "event_id", "") or "",
         session_date=getattr(schedule, "session_date", "") or "",
         session_start=getattr(schedule, "session_start", "") or "",
+        lab_code=getattr(schedule, "lab_code", "") or "",
     )
 
     # Add accessPassword to spec (not parameterValues)
@@ -3942,6 +3982,7 @@ def create_multi_workshop(
                 event_id=getattr(schedule, "event_id", "") or "",
                 session_date=getattr(schedule, "session_date", "") or "",
                 session_start=getattr(schedule, "session_start", "") or "",
+                lab_code=getattr(schedule, "lab_code", "") or "",
             )
             asset_payload = {
                 'spec': {
@@ -4025,6 +4066,7 @@ def create_multi_workshop(
             event_id=getattr(schedule, "event_id", "") or "",
             session_date=getattr(schedule, "session_date", "") or "",
             session_start=getattr(schedule, "session_start", "") or "",
+            lab_code=getattr(schedule, "lab_code", "") or "",
         )
         multi_workshop = {
             "apiVersion": "babylon.gpte.redhat.com/v1",

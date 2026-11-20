@@ -3,13 +3,19 @@ kind: ClusterRole
 metadata:
   name: rhdp-scheduler
 rules:
-  # Read namespaces for validation; create required for ensure-namespaces
-  # (event-{id}-{DDMMYYYY} and other non-UserNamespace projects). Apply this
-  # ClusterRole update before relying on POST /schedules/ensure-namespaces —
-  # without create, Flow returns Forbidden and leaves missing namespaces failed.
+  # Read namespaces; patch/update to stamp user-uid=EVENT + display-name after ProjectRequest
+  # (no bare Namespace create — use ProjectRequest)
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "patch", "update"]
+  # Create session-block OpenShift projects (event-{id}-{DDMMYYYY}-{HHMM})
+  - apiGroups: ["project.openshift.io"]
+    resources: ["projectrequests"]
+    verbs: ["create"]
+  # Teardown empty event-* projects after Workshops are gone
+  - apiGroups: ["project.openshift.io"]
+    resources: ["projects"]
+    verbs: ["get", "list", "delete"]
   # Manage Babylon workshop resources (deploy creates, operations patch, cleanup deletes).
   # multiworkshops required for multi-asset / Asset_CIs rows (Roadshow, LB1577, etc.).
   - apiGroups: ["babylon.gpte.redhat.com"]
