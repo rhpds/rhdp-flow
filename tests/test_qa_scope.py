@@ -19,6 +19,8 @@ def _row(**kwargs):
         namespace="ns",
         provisioning_date="30/09/2026 10:30",
         session_date="",
+        session_start="",
+        event_id="",
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -195,3 +197,37 @@ def test_merge_with_no_prior_returns_latest():
         [_row(ci_name="A", session_date="2026-09-30")], floor="event", ci_names=["A"]
     )
     assert merge_qa_coverage(None, latest) is latest
+
+
+def test_filter_event_id_without_namespace():
+    rows = [
+        _row(ci_name="A", namespace="ns-a", event_id="32", session_date="2026-09-30"),
+        _row(ci_name="B", namespace="ns-b", event_id="99", session_date="2026-09-30"),
+        _row(ci_name="C", namespace="ns-c", event_id="32", session_date="2026-10-01"),
+    ]
+    scoped = filter_schedules_by_scope(rows, event_id="32")
+    assert [r.ci_name for r in scoped] == ["A", "C"]
+    day = filter_schedules_by_scope(
+        rows, event_id=32, floor="day", floor_date="2026-09-30"
+    )
+    assert [r.ci_name for r in day] == ["A"]
+
+
+def test_filter_session_start_hhmm():
+    rows = [
+        _row(ci_name="AM", event_id="32", session_date="2026-09-30", session_start="0900"),
+        _row(ci_name="PM", event_id="32", session_date="2026-09-30", session_start="15:30"),
+    ]
+    scoped = filter_schedules_by_scope(rows, event_id="32", session_start="1530")
+    assert [r.ci_name for r in scoped] == ["PM"]
+
+
+def test_coverage_records_event_id():
+    rows = [
+        _row(ci_name="A", namespace="ns1", event_id="32", session_date="2026-09-30"),
+        _row(ci_name="B", namespace="ns2", event_id="99", session_date="2026-09-30"),
+    ]
+    cov = build_qa_coverage(rows, floor="event", event_id="32")
+    assert cov["event_id"] == "32"
+    assert [c["ci_name"] for c in cov["covered"]] == ["A"]
+    assert cov["namespaces"] == ["ns1"]

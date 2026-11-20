@@ -112,6 +112,43 @@ def normalize_ci_names(ci_names: Iterable[str] | None) -> frozenset[str] | None:
     return cleaned or None
 
 
+def normalize_event_id(value: str | int | None) -> str | None:
+    """Normalize Labagator event id for label / schedule matching."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def normalize_session_start(value: str | None) -> str | None:
+    """Normalize session start to HHMM when possible."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) >= 4:
+        return digits[:4]
+    if ":" in raw:
+        parts = raw.split(":")
+        try:
+            return f"{int(parts[0]):02d}{int(parts[1]):02d}"
+        except (ValueError, IndexError):
+            return raw
+    return raw
+
+
+def schedule_event_id(schedule) -> str | None:
+    """Labagator event id stamped on the schedule row (CSV Event_Id / Workshop label)."""
+    return normalize_event_id(getattr(schedule, "event_id", None) or "")
+
+
+def schedule_session_start(schedule) -> str | None:
+    """Session start as HHMM when present on the schedule row."""
+    return normalize_session_start(getattr(schedule, "session_start", None) or "")
+
+
 def schedule_matches_scope(
     schedule,
     *,
@@ -119,13 +156,29 @@ def schedule_matches_scope(
     floor_date: str | None = None,
     time_band: str | None = None,
     ci_names: Iterable[str] | None = None,
+    event_id: str | int | None = None,
+    session_start: str | None = None,
 ) -> bool:
     """Return True if schedule row is in QA scope.
 
     ``floor=event`` / omitted → all rows (optionally still band-filtered).
     ``floor=day`` → only rows whose Ops floor date equals ``floor_date``.
+    ``event_id`` → Labagator event label filter (preferred Ops path; no namespace required).
+    ``session_start`` → optional HHMM filter for future session-scoped runs.
     ``ci_names`` → optional subset (retry-failed / pick which workshops to QA).
     """
+    want_event = normalize_event_id(event_id)
+    if want_event is not None:
+        got_event = schedule_event_id(schedule)
+        if got_event != want_event:
+            return False
+
+    want_start = normalize_session_start(session_start)
+    if want_start is not None:
+        got_start = schedule_session_start(schedule)
+        if got_start != want_start:
+            return False
+
     floor_mode = (floor or "event").strip().lower()
     if floor_mode not in VALID_FLOOR:
         floor_mode = "event"
@@ -171,6 +224,8 @@ def filter_schedules_by_scope(
     floor_date: str | None = None,
     time_band: str | None = None,
     ci_names: Iterable[str] | None = None,
+    event_id: str | int | None = None,
+    session_start: str | None = None,
 ) -> list:
     out = []
     want_cis = normalize_ci_names(ci_names)
@@ -183,6 +238,8 @@ def filter_schedules_by_scope(
             floor_date=floor_date,
             time_band=time_band,
             ci_names=want_cis,
+            event_id=event_id,
+            session_start=session_start,
         ):
             continue
         out.append(s)
@@ -245,6 +302,8 @@ def build_qa_coverage(
     time_band: str | None = None,
     ci_names: Iterable[str] | None = None,
     namespaces: Iterable[str] | None = None,
+    event_id: str | int | None = None,
+    session_start: str | None = None,
 ) -> dict:
     """Describe exactly which schedule rows a QA run covered.
 
@@ -257,12 +316,17 @@ def build_qa_coverage(
     if namespaces:
         ns_filter = {str(n).strip() for n in namespaces if str(n).strip()} or None
 
+    want_event = normalize_event_id(event_id)
+    want_start = normalize_session_start(session_start)
+
     in_scope = filter_schedules_by_scope(
         schedules,
         floor=floor,
         floor_date=floor_date,
         time_band=time_band,
         ci_names=ci_names,
+        event_id=want_event,
+        session_start=want_start,
     )
 
     covered: list[dict] = []
@@ -277,6 +341,8 @@ def build_qa_coverage(
                 "ci_name": getattr(s, "ci_name", None),
                 "namespace": ns,
                 "session_date": schedule_floor_date(s),
+                "session_start": schedule_session_start(s),
+                "event_id": schedule_event_id(s),
                 "time_band": time_band_key(dt) if dt else None,
             }
         )
@@ -293,6 +359,8 @@ def build_qa_coverage(
         "time_band": time_band if time_band in VALID_TIME_BANDS else None,
         "ci_names": sorted(norm_cis) if norm_cis else None,
         "namespaces": sorted(ns_filter) if ns_filter else covered_namespaces,
+        "event_id": want_event,
+        "session_start": want_start,
         "covered": covered,
         "expected_total": len(covered),
     }

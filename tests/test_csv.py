@@ -501,3 +501,16 @@ class TestLoadAssetNumUsers:
         assert result["ci-a"] == 10
         assert result["ci-c"] == 15
         assert "ci-b" not in result
+
+
+def test_read_csv_parses_event_id(tmp_path):
+    from rhdp_flow import read_csv_input
+    csv_path = tmp_path / "sched.csv"
+    csv_path.write_text(
+        "CI Name,CI,Namespace,Users,Enable_workshop_interface,Password,Activity,Purpose,"
+        "Workshop Name,Provisioning Date (UTC),Auto-stop (UTC),Auto-destroy (UTC),Event_Id\n"
+        "Lab,lab.prod,user-ns,1,true,pw,Admin,QA,Lab,01/08/2026 10:00,01/08/2026 18:00,02/08/2026 10:00,32\n"
+    )
+    schedules = read_csv_input(str(csv_path))
+    assert len(schedules) == 1
+    assert schedules[0].event_id == "32"

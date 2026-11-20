@@ -43,6 +43,18 @@ export interface TenantClusterRef {
 }
 
 const API = '/api';
+export interface DependencyPlan {
+  version: 'parent_child_v1'; run_id: string; namespace: string; revision: number;
+  scope: 'session' | 'shared_group'; session_ids: number[];
+  nodes: { key: string; role: 'parent' | 'child'; ci_name: string; count: number; users: number;
+    deploy_on: string; auto_destroy: string; parameters: Record<string, unknown>;
+    bindings: { resource_name: string; source_key: string; target_parameter: string; sensitive: boolean }[] }[];
+}
+export interface DependencyStatus {
+  id: string; state: string;
+  nodes: { key: string; role: string; state: string; error_code?: string | null }[];
+  consumers?: { session_id: number; released: boolean }[];
+}
 let selectedTarget = '';
 export const getSelectedTarget = () => selectedTarget;
 export function selectTargetCluster(target: string) {
@@ -121,6 +133,12 @@ export function clearApiCache() {
 }
 
 export const api = {
+  dependencyCapabilities: () => request<{ deployment_contracts: string[]; disabled_reasons: string[] }>('/capabilities'),
+  dependencyPlan: (id: string) => request<{ plan: DependencyPlan; target_cluster: string }>(`/dependency-plans/${encodeURIComponent(id)}`),
+  dependencyStart: (id: string, key: string) => request<{ run_id: string; state: string }>(`/dependency-plans/${encodeURIComponent(id)}/runs`, { method: 'POST', headers: { 'Idempotency-Key': key } }),
+  dependencyStatus: (id: string) => request<DependencyStatus>(`/dependency-runs/${encodeURIComponent(id)}`),
+  dependencyAction: (id: string, action: 'cancel' | 'destroy' | 'retry', nodeKeys?: string[]) => request<{ run_id: string; state: string }>(`/dependency-runs/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: action === 'retry' ? JSON.stringify({ node_keys: nodeKeys }) : undefined }),
+  dependencyRelease: (id: string, sessionId: number) => request(`/dependency-runs/${encodeURIComponent(id)}/release`, { method: 'POST', body: JSON.stringify({ session_id: sessionId }) }),
   health: () => cachedRequest<HealthResponse>('/health'),
 
   /** Cluster catalog items (prod + event + dev). Cached 60s — dropdowns share one fetch. */
@@ -245,6 +263,18 @@ export const api = {
   getSchedules: () => cachedRequest<WorkshopSchedule[]>('/schedules'),
   validateNamespaces: (targetCluster?: string | null) =>
     request<{ namespaces: Record<string, boolean>; missing: string[] }>(`/schedules/validate-namespaces${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
+  ensureNamespaces: (opts?: { createMissing?: boolean; targetCluster?: string | null }) => {
+    const params = new URLSearchParams();
+    if (opts?.targetCluster) params.set('target_cluster', opts.targetCluster);
+    if (opts?.createMissing === false) params.set('create_missing', 'false');
+    const qs = params.toString();
+    return request<{
+      namespaces: Record<string, boolean>;
+      missing: string[];
+      created: string[];
+      failed: Array<{ namespace: string; error: string }>;
+    }>(`/schedules/ensure-namespaces${qs ? `?${qs}` : ''}`, { method: 'POST', body: '{}' });
+  },
   validateNumUsers: (targetCluster?: string | null) =>
     request<NumUsersValidationResponse>(`/schedules/validate-num-users${targetCluster ? `?target_cluster=${encodeURIComponent(targetCluster)}` : ''}`, { method: 'POST', body: '{}' }),
   validateParameters: (targetCluster?: string | null) =>

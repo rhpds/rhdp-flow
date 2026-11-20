@@ -1,0 +1,14 @@
+{
+  "lib/dependency_contract.py": {
+    "labagator_source": "app/schemas/dependency.py",
+    "sha256": "376e1e26fdcd8c38430a9e9ed040487181199823172cf4782616c94edefa89a0"
+  },
+  "lib/dependency_outputs.py": {
+    "labagator_source": "app/services/dependency_outputs.py",
+    "sha256": "5a496278cd7905e930d4f8fca0450c05497584ddbb74b63f1de13db451132045"
+  },
+  "lib/dependency_parameters.py": {
+    "labagator_source": "app/services/dependency_parameters.py",
+    "sha256": "a2d089e3d0dfc999894695ecc7ed9ccd2ef7333aaa0638dd54e8b812e070b56d"
+  }
+}

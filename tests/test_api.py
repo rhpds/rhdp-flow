@@ -1896,6 +1896,10 @@ class TestAuthEnforcement:
         resp = auth_client.post("/api/schedules/validate-namespaces")
         assert resp.status_code == 403
 
+    def test_ensure_namespaces_requires_key(self, auth_client):
+        resp = auth_client.post("/api/schedules/ensure-namespaces")
+        assert resp.status_code == 403
+
     def test_validate_num_users_requires_key(self, auth_client):
         resp = auth_client.post("/api/schedules/validate-num-users")
         assert resp.status_code == 403

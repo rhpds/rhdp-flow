@@ -181,6 +181,93 @@ def _workshop_provision_parameters(param_values: dict, resourceclaim_payload: di
     return params
 
 
+LABAGATOR_EVENT_ID_LABEL = "labagator.redhat.com/event-id"
+LABAGATOR_SESSION_DATE_LABEL = "labagator.redhat.com/session-date"
+LABAGATOR_SESSION_START_LABEL = "labagator.redhat.com/session-start"
+LABAGATOR_LAB_CODE_LABEL = "labagator.redhat.com/lab-code"
+
+
+def _normalize_session_start_hhmm(value: str | None) -> str:
+    """Normalize HH:MM / HHMM / ISO time to HHMM (K8s label-safe, no colon)."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if "T" in text or " " in text:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return f"{dt.hour:02d}{dt.minute:02d}"
+        except ValueError:
+            text = text.split("T")[-1].split(" ")[-1][:8]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 4:
+        hour, minute = int(digits[:2]), int(digits[2:4])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}{minute:02d}"
+    return ""
+
+
+def _stamp_labagator_event_id(labels: dict, event_id: str | None) -> None:
+    """Set labagator.redhat.com/event-id on a labels dict when event_id is set."""
+    if not event_id:
+        return
+    value = str(event_id).strip()
+    if value:
+        labels[LABAGATOR_EVENT_ID_LABEL] = value
+
+
+def _stamp_labagator_session_labels(
+    labels: dict,
+    *,
+    session_date: str | None = None,
+    session_start: str | None = None,
+) -> None:
+    """Stamp session-date (YYYY-MM-DD) and session-start (HHMM UTC) when set."""
+    date_val = (session_date or "").strip()[:10]
+    if date_val:
+        labels[LABAGATOR_SESSION_DATE_LABEL] = date_val
+    start_val = _normalize_session_start_hhmm(session_start)
+    if start_val:
+        labels[LABAGATOR_SESSION_START_LABEL] = start_val
+
+
+def _stamp_labagator_lab_code(labels: dict, lab_code: str | None) -> None:
+    """Set labagator.redhat.com/lab-code when lab_code is set."""
+    if not lab_code:
+        return
+    value = str(lab_code).strip()
+    if value:
+        labels[LABAGATOR_LAB_CODE_LABEL] = value
+
+
+def _stamp_labagator_labels(
+    labels: dict,
+    *,
+    event_id: str | None = None,
+    session_date: str | None = None,
+    session_start: str | None = None,
+    lab_code: str | None = None,
+) -> None:
+    """Stamp all Labagator Ops isolation labels onto a metadata.labels dict."""
+    _stamp_labagator_event_id(labels, event_id)
+    _stamp_labagator_session_labels(labels, session_date=session_date, session_start=session_start)
+    _stamp_labagator_lab_code(labels, lab_code)
+
+
+def _copy_labagator_event_id_label(src_labels: dict, dest_labels: dict) -> None:
+    """Copy Labagator event-id + session + lab-code labels from one labels map to another."""
+    for key in (
+        LABAGATOR_EVENT_ID_LABEL,
+        LABAGATOR_SESSION_DATE_LABEL,
+        LABAGATOR_SESSION_START_LABEL,
+        LABAGATOR_LAB_CODE_LABEL,
+    ):
+        val = (src_labels or {}).get(key)
+        if val:
+            dest_labels[key] = str(val)
+
+
 @dataclass
 class WorkshopSchedule:
     """Represents a workshop schedule from input CSV"""
@@ -196,6 +283,10 @@ class WorkshopSchedule:
     auto_stop: str  # Format: DD/MM/YY HH:MM
     auto_destroy: str  # Format: DD/MM/YY HH:MM
     session_date: str = ""  # Optional Ops Floor day (YYYY-MM-DD); aliases: Session Date, Floor Date
+    session_start: str = ""  # Session start HH:MM or HHMM UTC → labagator.redhat.com/session-start (HHMM)
+    event_id: str = ""  # Labagator event id → metadata.labels[labagator.redhat.com/event-id]
+    event_name: str = ""  # Labagator event display name → Project openshift.io/display-name
+    lab_code: str = ""  # Session/container lab code → metadata.labels[labagator.redhat.com/lab-code]
     is_multi_asset: bool = False  # True if this is a multi-asset workshop
     asset_cis: str = ""  # Comma-separated list of catalog items for multi-asset workshops (e.g., "ci1,ci2,ci3")
     multi_workshop_name: str = ""  # Optional custom name for multi-asset workshop (e.g., "automation-test" or "test-qvvdw")
@@ -872,6 +963,12 @@ class RHDPConfig:
         self.agnosticv_ssh_key_path: str | None = None
         self.agnosticv_cli_path: str = "agnosticv"
         self.agnosticv_refresh_ttl_seconds: int = 900
+        # Used for non-user-* namespaces (e.g. event-{id}-{DDMMYYYY}) when no
+        # explicit requester_email is passed. Prefer RHDP_DEFAULT_REQUESTER_EMAIL
+        # or the authenticated operator email set by the API layer.
+        self.default_requester_email: str = (
+            os.environ.get("RHDP_DEFAULT_REQUESTER_EMAIL", "").strip()
+        )
 
     def validate(self) -> bool:
         """Validate configuration"""
@@ -1064,6 +1161,10 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
             # Check for required headers - allow either old or new format
             reader_fieldnames = {h.strip() for h in reader.fieldnames}
             reader_lower = {h.lower() for h in reader_fieldnames}
+            dependency_columns = {'dependency_plan', 'dependency_role', 'dependency_bindings',
+                                  'dependency_run_id', 'parent_child_v1', 'parent_lab_id'}
+            if reader_lower & dependency_columns:
+                raise ValueError('dependency_plan_requires_structured_transport')
             
             # Required core headers (always needed)
             core_required = {'ci name', 'ci', 'namespace', 'users', 
@@ -1096,6 +1197,11 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
             
             # Read rows
             for row_num, row in enumerate(reader, start=2):
+                for column, value in row.items():
+                    if (column or '').strip().lower() in {'item_type', 'lab_type', 'deployment_contract'} and (
+                        str(value).strip().lower() in {'parent_child', 'parent_child_v1', 'dependency_parent', 'dependency_child'}
+                    ):
+                        raise ValueError('dependency_plan_requires_structured_transport')
                 try:
                     # Get values using case-insensitive lookup
                     ci_name = row[header_map.get('ci name', 'CI Name')].strip()
@@ -1188,6 +1294,50 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
                             except ValueError:
                                 continue
                     
+
+                    session_start = ""
+                    for start_key in (
+                        "session_start",
+                        "session start",
+                        "session_start_utc",
+                        "session start utc",
+                    ):
+                        if start_key in header_map:
+                            session_start = row.get(header_map[start_key], "").strip()
+                            break
+
+                    event_id = ""
+                    for eid_key in (
+                        "event_id",
+                        "event id",
+                        "labagator_event_id",
+                        "labagator event id",
+                    ):
+                        if eid_key in header_map:
+                            event_id = row.get(header_map[eid_key], "").strip()
+                            break
+
+                    event_name = ""
+                    for en_key in (
+                        "event_name",
+                        "event name",
+                        "labagator_event_name",
+                        "labagator event name",
+                    ):
+                        if en_key in header_map:
+                            event_name = row.get(header_map[en_key], "").strip()
+                            break
+
+                    lab_code = ""
+                    for lc_key in (
+                        "lab_code",
+                        "lab code",
+                        "labagator_lab_code",
+                        "labagator lab code",
+                    ):
+                        if lc_key in header_map:
+                            lab_code = row.get(header_map[lc_key], "").strip()
+                            break
                     # Validate required fields
                     if not all([ci_name, ci, namespace]):
                         logger.warning(f"Row {row_num}: Skipping incomplete record")
@@ -1250,6 +1400,10 @@ def read_csv_input(filepath: str) -> list[WorkshopSchedule]:
                         auto_stop=auto_stop,
                         auto_destroy=auto_destroy,
                         session_date=session_date,
+                        session_start=session_start,
+                        event_id=event_id,
+                        event_name=event_name,
+                        lab_code=lab_code,
                         is_multi_asset=is_multi_asset,
                         asset_cis=asset_cis,
                         multi_workshop_name=multi_workshop_name,
@@ -1530,6 +1684,36 @@ def write_deployment_results(
 # RESOURCECLAIM CREATION
 # ============================================================================
 
+def resolve_requester_email(
+    namespace: str,
+    requester_email: str = "",
+    operator_email: str = "",
+) -> str:
+    """Resolve demo.redhat.com/requester for a deploy namespace.
+
+    Preference order:
+      1. Explicit ``requester_email``
+      2. Derived from ``user-<name>-<domain-parts>`` namespaces
+      3. Operator / default requester email (never ``admin@example.com``)
+    """
+    explicit = (requester_email or "").strip()
+    if explicit:
+        return explicit
+    ns = (namespace or "").strip()
+    if ns.startswith("user-"):
+        # user-bbethell-redhat-com → bbethell@redhat.com
+        parts = ns[len("user-"):].split("-")
+        if len(parts) >= 2:
+            username = parts[0]
+            domain = ".".join(parts[1:])
+            if username and domain:
+                return f"{username}@{domain}"
+    operator = (operator_email or "").strip()
+    if operator:
+        return operator
+    return ""
+
+
 def build_resource_claim_payload(
     schedule: WorkshopSchedule,
     config: RHDPConfig | None = None,
@@ -1545,16 +1729,14 @@ def build_resource_claim_payload(
     Returns:
         Dictionary representing the ResourceClaim payload
     """
-    # Extract email from namespace if not provided
-    if not requester_email:
-        # Namespace format: user-bbethell-redhat-com -> bbethell@redhat.com
-        namespace_parts = schedule.namespace.replace('user-', '').split('-')
-        if len(namespace_parts) >= 3:
-            username = namespace_parts[0]
-            domain_parts = namespace_parts[1:]
-            requester_email = f"{username}@{'.'.join(domain_parts)}"
-        else:
-            requester_email = "admin@example.com"  # Fallback if namespace format is unexpected
+    operator = ""
+    if config is not None:
+        operator = getattr(config, "default_requester_email", "") or ""
+    requester_email = resolve_requester_email(
+        schedule.namespace,
+        requester_email=requester_email,
+        operator_email=operator,
+    )
     
     # Parse dates
     provisioning_dt = parse_date_time(schedule.provisioning_date)
@@ -1644,6 +1826,15 @@ def build_resource_claim_payload(
             payload["metadata"]["labels"]["flow.demo.redhat.com/cluster-ci"] = cluster_ci
     else:
         payload["metadata"]["labels"]["flow.demo.redhat.com/item-type"] = "workshop"
+
+    # Labagator Ops isolation — event-id + session-date/start from CSV/API.
+    _stamp_labagator_labels(
+        payload["metadata"]["labels"],
+        event_id=getattr(schedule, "event_id", "") or "",
+        session_date=getattr(schedule, "session_date", "") or "",
+        session_start=getattr(schedule, "session_start", "") or "",
+        lab_code=getattr(schedule, "lab_code", "") or "",
+    )
 
     # Add accessPassword to spec (not parameterValues)
     if schedule.password:
@@ -1760,6 +1951,7 @@ def build_workshop_resource_dict(
         workshop_metadata["labels"]["flow.demo.redhat.com/item-type"] = rc_labels["flow.demo.redhat.com/item-type"]
     if "flow.demo.redhat.com/cluster-ci" in rc_labels:
         workshop_metadata["labels"]["flow.demo.redhat.com/cluster-ci"] = rc_labels["flow.demo.redhat.com/cluster-ci"]
+    _copy_labagator_event_id_label(rc_labels, workshop_metadata["labels"])
 
     workshop_spec = {
         "displayName": workshop_display_name,
@@ -1828,6 +2020,7 @@ def build_workshop_provision_dict(
         provision_labels["flow.demo.redhat.com/item-type"] = rc_labels["flow.demo.redhat.com/item-type"]
     if "flow.demo.redhat.com/cluster-ci" in rc_labels:
         provision_labels["flow.demo.redhat.com/cluster-ci"] = rc_labels["flow.demo.redhat.com/cluster-ci"]
+    _copy_labagator_event_id_label(rc_labels, provision_labels)
 
     return {
         "apiVersion": "babylon.gpte.redhat.com/v1",
@@ -3622,6 +3815,9 @@ def create_multi_workshop_from_group(
         provisioning_date=first.provisioning_date,
         auto_stop=first.auto_stop,
         auto_destroy=first.auto_destroy,
+        session_date=getattr(first, "session_date", "") or "",
+        session_start=getattr(first, "session_start", "") or "",
+        event_id=getattr(first, "event_id", "") or "",
         is_multi_asset=True,
         asset_cis=asset_cis,
         multi_workshop_name=first.multi_workshop_name,
@@ -3780,6 +3976,14 @@ def create_multi_workshop(
                 asset_param_values['num_users'] = asset_num_users[asset_ci]
             elif _should_include_users(schedule) and schedule.users is not None:
                 asset_param_values['num_users'] = schedule.users
+            asset_labels = {}
+            _stamp_labagator_labels(
+                asset_labels,
+                event_id=getattr(schedule, "event_id", "") or "",
+                session_date=getattr(schedule, "session_date", "") or "",
+                session_start=getattr(schedule, "session_start", "") or "",
+                lab_code=getattr(schedule, "lab_code", "") or "",
+            )
             asset_payload = {
                 'spec': {
                     'provider': {
@@ -3795,11 +3999,15 @@ def create_multi_workshop(
                 'metadata': {
                     'annotations': {
                         'babylon.gpte.redhat.com/catalogItemDisplayName': display_name,
-                        'demo.redhat.com/requester': schedule.namespace.replace('user-', '').replace('-redhat-com', '@redhat.com'),
+                        'demo.redhat.com/requester': resolve_requester_email(
+                            schedule.namespace,
+                            operator_email=getattr(config, "default_requester_email", "") or "",
+                        ),
                         'demo.redhat.com/purpose': schedule.purpose,
                         'demo.redhat.com/purpose-activity': schedule.activity,
                         'demo.redhat.com/salesforce-items': _salesforce_items(schedule)
-                    }
+                    },
+                    'labels': asset_labels,
                 }
             }
 
@@ -3852,6 +4060,14 @@ def create_multi_workshop(
         # Step 3: Create MultiWorkshop resource
         logger.info(f"Creating MultiWorkshop '{multi_workshop_name}' with {len(assets)} assets...")
 
+        mw_labels = {}
+        _stamp_labagator_labels(
+            mw_labels,
+            event_id=getattr(schedule, "event_id", "") or "",
+            session_date=getattr(schedule, "session_date", "") or "",
+            session_start=getattr(schedule, "session_start", "") or "",
+            lab_code=getattr(schedule, "lab_code", "") or "",
+        )
         multi_workshop = {
             "apiVersion": "babylon.gpte.redhat.com/v1",
             "kind": "MultiWorkshop",
@@ -3859,8 +4075,12 @@ def create_multi_workshop(
                 "name": multi_workshop_name,
                 "namespace": schedule.namespace,
                 "annotations": {
-                    "babylon.gpte.redhat.com/created-by": schedule.namespace.replace('user-', '').replace('-redhat-com', '@redhat.com')
-                }
+                    "babylon.gpte.redhat.com/created-by": resolve_requester_email(
+                        schedule.namespace,
+                        operator_email=getattr(config, "default_requester_email", "") or "",
+                    )
+                },
+                "labels": mw_labels,
             },
             "spec": {
                 "assets": assets,

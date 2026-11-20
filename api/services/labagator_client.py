@@ -85,22 +85,25 @@ def list_flow_sessions(event_id: int, filter_date: str | None = None) -> list[di
 
 def get_deploy_handoff_csv(
     event_id: int,
-    namespace: str,
-    enable_workshop_interface: bool,
-    concurrency: int,
-    white_glove: bool,
-    auto_stop_days: int,
-    auto_destroy_days: int,
+    namespace: str = "",
+    enable_workshop_interface: bool = True,
+    concurrency: int = 10,
+    white_glove: bool = True,
+    auto_stop_days: int = 0,
+    auto_destroy_days: int = 0,
     room_session_ids: list[int] | None = None,
+    filter_date: str | None = None,
 ) -> str:
     """Fetch the Flow-format CSV for one event's sessions from Labagator.
 
     When ``room_session_ids`` is provided, only those room sessions are exported
     (the session-picker path); otherwise the whole event is exported.
+    ``filter_date`` (YYYY-MM-DD) limits export to one Ops Floor day.
+    ``namespace`` may be blank when every session has a per-session flow_namespace.
     """
     url = f"{LABAGATOR_BASE_URL}{_API_PREFIX}/exports/deploy-handoff/{event_id}/flow-csv"
     params = {
-        "namespace": namespace,
+        "namespace": namespace or "",
         "enable_workshop_interface": enable_workshop_interface,
         "concurrency": concurrency,
         "white_glove": white_glove,
@@ -109,6 +112,8 @@ def get_deploy_handoff_csv(
     }
     if room_session_ids:
         params["room_session_ids"] = ",".join(str(i) for i in room_session_ids)
+    if filter_date:
+        params["filter_date"] = str(filter_date).strip()[:10]
     try:
         resp = requests.get(url, params=params, timeout=_TIMEOUT_SECONDS)
     except requests.RequestException as e:

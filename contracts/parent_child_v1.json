@@ -1,0 +1,51 @@
+{
+  "version": "parent_child_v1",
+  "run_id": "run-1",
+  "event_id": 1,
+  "cluster_id": 1,
+  "namespace": "test-ns",
+  "scope": "session",
+  "scope_key": "session:1",
+  "revision": 1,
+  "session_ids": [
+    1
+  ],
+  "readiness_timeout_minutes": 240,
+  "nodes": [
+    {
+      "key": "parent",
+      "role": "parent",
+      "lab_id": 1,
+      "ci_name": "parent.event",
+      "catalog_namespace": "babylon-catalog-event",
+      "count": 1,
+      "users": 1,
+      "parameters": {},
+      "bindings": [],
+      "deploy_on": "2026-11-18T00:00:00Z",
+      "auto_destroy": "2026-11-19T00:00:00Z",
+      "workshop_name": "test-parent"
+    },
+    {
+      "key": "child",
+      "role": "child",
+      "lab_id": 2,
+      "ci_name": "child.event",
+      "catalog_namespace": "babylon-catalog-event",
+      "count": 1,
+      "users": 1,
+      "parameters": {},
+      "bindings": [
+        {
+          "resource_name": "leaderboard",
+          "source_key": "password",
+          "target_parameter": "password",
+          "sensitive": true
+        }
+      ],
+      "deploy_on": "2026-11-18T00:00:00Z",
+      "auto_destroy": "2026-11-19T00:00:00Z",
+      "workshop_name": "test-child"
+    }
+  ]
+}
