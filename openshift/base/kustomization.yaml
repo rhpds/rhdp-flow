@@ -17,6 +17,7 @@ resources:
   - configmap.yaml
   - secret.yaml
   - pvc.yaml
+  - postgres.yaml
   - deployment.yaml
   - service.yaml
   - route.yaml

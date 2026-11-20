@@ -21,6 +21,8 @@ from fastapi.responses import Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
 from api.auth import verify_api_key
+from api import workspace_store as wstore
+from api.workspace_store import require_workspace, ws, current_workspace_id, DEFAULT_WORKSPACE
 
 # Ensure parent directory is on sys.path so we can import rhdp_flow
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -147,301 +149,42 @@ logger = logging.getLogger("rhdp_flow.api")
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# In-memory state (+ disk restore — PVC at RHDP_FLOW_DATA_DIR survives rollouts)
+# Workspace-scoped durable state (see api.workspace_store)
+# Module aliases keep call sites readable: assign via ws.* which persists to
+# DB for the ContextVar workspace (header X-RHDP-Workspace).
 # ---------------------------------------------------------------------------
-from lib import flow_state as _flow_state
+from lib import flow_state as _flow_state  # noqa: F401 — kept for optional PVC migration
 
-_schedules: list[WorkshopSchedule] = []
-_qa_results: list[QAResultItem] = []
-# Scope metadata for the last QA run — what QA actually covered (floor/band/CI
-# subset + per-row covered list). Emitted on /qa/results so Labagator trusts
-# Flow's coverage instead of guessing it from its own session roster.
+MAX_SESSIONS = 50  # archives per workspace (enforced in workspace_store)
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Process-local extras not yet in WorkspaceData (Flow UI / operator audit)
 _qa_last_scope: dict | None = None
-_csv_filepath: str | None = None  # stashed for QA functions that need a path
-_current_filename: str = ""
-_asset_passwords: dict[str, str] | None = None
-_deploy_log_path: str | None = None
-_qa_log_path: str | None = None
-_destroy_check_results: list[dict] = []
-# Operator-accepted local tweaks (Users→Instances, skip CIs, −4h, etc.).
-# Kept so Deployments / logs can show "human overrode Labagator" — not Flow inventing values.
 _operator_overrides: list[OperatorOverride] = []
-_deployment_results: list[DeploymentResult] = []
+_sessions: list[dict] = []
+_session_counter: int = 0
 
 
 def _save_results(results: list[DeploymentResult]) -> None:
-    _flow_state.save_results(results)
+    """Persist deployment results into the current workspace."""
+    def mut(data):
+        data.deployment_results = list(results)
+    wstore.update(mut)
 
 
 def _save_schedules() -> None:
-    _flow_state.save_schedules(_schedules, filename=_current_filename)
+    """Persist schedules + filename for the current workspace (ws already holds them)."""
+    def mut(data):
+        data.schedules = list(ws.schedules)
+        data.current_filename = ws.current_filename or ""
+    wstore.update(mut)
 
 
 def _save_qa_results() -> None:
-    _flow_state.save_qa_results(_qa_results)
+    def mut(data):
+        data.qa_results = list(ws.qa_results)
+    wstore.update(mut)
 
-
-def _restore_persisted_state() -> None:
-    global _schedules, _current_filename, _deployment_results, _qa_results
-    restored_schedules, filename = _flow_state.load_schedules(WorkshopSchedule)
-    restored_results = _flow_state.load_results(DeploymentResult)
-    restored_qa = _flow_state.load_qa_results()
-    if restored_schedules:
-        _schedules = restored_schedules
-        _current_filename = filename
-        logger.info(
-            "Restored %d schedule(s) from disk%s",
-            len(_schedules),
-            f" ({filename})" if filename else "",
-        )
-    if restored_results:
-        _deployment_results = restored_results
-        logger.info("Restored %d deployment result(s) from disk", len(_deployment_results))
-    if restored_qa:
-        loaded: list[QAResultItem] = []
-        for row in restored_qa:
-            try:
-                loaded.append(QAResultItem(**_normalize_qa_result_dict(row)))
-            except Exception as exc:
-                logger.warning("Skipping persisted QA row: %s", exc)
-        if loaded:
-            _qa_results = loaded
-            logger.info("Restored %d QA result(s) from disk", len(_qa_results))
-
-
-# Session history — each completed upload+deploy cycle gets archived here
-# (persisted state is restored after helper defs below — see _restore_persisted_state call)
-_sessions: list[dict] = []
-_session_counter: int = 0
-MAX_SESSIONS = 50
-MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-
-
-def _validate_export_yaml_dir(path: str) -> str:
-    """Validate export_yaml_dir to prevent arbitrary filesystem writes.
-
-    Returns resolved safe path or raises HTTPException if invalid.
-    """
-    import tempfile
-    from pathlib import Path
-
-    # Allow only paths under temp directory or a designated 'exports' subdirectory
-    allowed_prefixes = [
-        Path(tempfile.gettempdir()).resolve(),
-        Path.cwd() / "exports",
-        Path.cwd() / "tmp",
-    ]
-
-    try:
-        resolved_path = Path(path).expanduser().resolve()
-    except (ValueError, OSError) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid path: {e}")
-
-    # Check if path is under any allowed prefix
-    for allowed in allowed_prefixes:
-        try:
-            resolved_path.relative_to(allowed)
-            return str(resolved_path)
-        except ValueError:
-            continue
-
-    raise HTTPException(
-        status_code=400,
-        detail=f"Export path must be under temp directory or exports/tmp subdirectory. Got: {resolved_path}"
-    )
-
-
-# Built-in schedule examples (files under docs/examples/)
-_SCHEDULE_EXAMPLES: dict[str, tuple[str, str]] = {
-    "basic": ("basic_workshop.csv", "Basic workshop"),
-    "full": ("full_featured.csv", "Full featured"),
-    "minimal": ("minimal_workshop.csv", "Minimal"),
-}
-
-
-def _schedule_examples_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "docs" / "examples"
-
-
-def _write_qa_csv_for_namespace(
-    namespace: str,
-    *,
-    floor: str = "event",
-    floor_date: str | None = None,
-    time_band: str | None = None,
-    ci_names: list[str] | None = None,
-    event_id: str | None = None,
-    session_start: str | None = None,
-) -> str:
-    """Write a temporary CSV containing schedules for one namespace (optional floor day / CI subset)."""
-    filtered = filter_schedules_by_scope(
-        _schedules,
-        namespace=namespace,
-        floor=floor,
-        floor_date=floor_date,
-        time_band=time_band,
-        ci_names=ci_names,
-        event_id=event_id,
-        session_start=session_start,
-    )
-    if not filtered:
-        scope_bits = [f'namespace "{namespace}"']
-        if floor == "day" and floor_date:
-            scope_bits.append(f"floor day {floor_date}")
-        if time_band:
-            scope_bits.append(f"band {time_band}")
-        if ci_names:
-            scope_bits.append(f"{len(ci_names)} selected CI name(s)")
-        raise HTTPException(
-            400,
-            f"No loaded schedules match {' · '.join(scope_bits)}.",
-        )
-
-    fieldnames = [
-        "CI Name",
-        "CI",
-        "Namespace",
-        "Users",
-        "Enable_workshop_interface",
-        "Password",
-        "Activity",
-        "Purpose",
-        "Workshop Name",
-        "Provisioning Date (UTC)",
-        "Auto-stop (UTC)",
-        "Auto-destroy (UTC)",
-        "Session Date",
-        "Session_Start",
-        "Event_Id",
-        "Event_Name",
-        "Lab_Code",
-        "Multi_Asset",
-        "Asset_CIs",
-        "Multi_Workshop_Name",
-        "Concurrency",
-        "Instances",
-        "Salesforce IDs",
-        "Salesforce_Type",
-        "Count",
-        "AWS_Region",
-        "Redirect",
-        "Catalog_Namespace",
-        "Showroom_Repo",
-        "Showroom_Ref",
-        "Showroom_NoVNC",
-        "Showroom_Zerotouch",
-        "White_Glove",
-        "Item_Type",
-        "Cluster_CI",
-    ]
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
-    with tmp:
-        writer = csv.DictWriter(tmp, fieldnames=fieldnames)
-        writer.writeheader()
-        for s in filtered:
-            writer.writerow({
-                "CI Name": s.ci_name,
-                "CI": s.ci,
-                "Namespace": s.namespace,
-                "Users": "" if s.users is None else s.users,
-                "Enable_workshop_interface": s.enable_workshop_interface,
-                "Password": s.password,
-                "Activity": s.activity,
-                "Purpose": s.purpose,
-                "Workshop Name": s.workshop_name,
-                "Provisioning Date (UTC)": s.provisioning_date,
-                "Auto-stop (UTC)": s.auto_stop,
-                "Auto-destroy (UTC)": s.auto_destroy,
-                "Session Date": getattr(s, "session_date", "") or "",
-                "Session_Start": getattr(s, "session_start", "") or "",
-                "Event_Id": getattr(s, "event_id", "") or "",
-                "Event_Name": getattr(s, "event_name", "") or "",
-                "Lab_Code": getattr(s, "lab_code", "") or "",
-                "Multi_Asset": s.is_multi_asset,
-                "Asset_CIs": s.asset_cis,
-                "Multi_Workshop_Name": s.multi_workshop_name,
-                "Concurrency": "" if s.concurrency is None else s.concurrency,
-                "Instances": "" if s.instances is None else s.instances,
-                "Salesforce IDs": s.salesforce_ids,
-                "Salesforce_Type": s.salesforce_type,
-                "Count": "" if s.count is None else s.count,
-                "AWS_Region": s.aws_regions,
-                "Redirect": s.redirect,
-                "Catalog_Namespace": s.catalog_namespace,
-                "Showroom_Repo": s.showroom_repo,
-                "Showroom_Ref": s.showroom_ref,
-                "Showroom_NoVNC": s.showroom_novnc,
-                "Showroom_Zerotouch": s.showroom_zerotouch,
-                "White_Glove": s.white_glove,
-                "Item_Type": s.item_type if s.item_type else "",
-                "Cluster_CI": s.cluster_ci_override if s.cluster_ci_override else "",
-            })
-    return tmp.name
-
-
-def _coerce_optional_int(val) -> int | None:
-    if val is None or val == "":
-        return None
-    if isinstance(val, bool):
-        return int(val)
-    if isinstance(val, int):
-        return val
-    if isinstance(val, float):
-        return int(val)
-    try:
-        return int(str(val).strip())
-    except ValueError:
-        return None
-
-
-_EMOJI_RE = re.compile(r"[✅❌⚠️🔴🟢🟡]+\s*")
-
-
-def _clean_status(raw: str) -> str:
-    """Strip emoji and normalize status string for consistent frontend display."""
-    if not raw:
-        return raw
-    cleaned = _EMOJI_RE.sub("", raw).strip()
-    return cleaned
-
-
-def _normalize_qa_result_dict(r: dict) -> dict:
-    """Align QA1 / QA2 dict keys so QAResultItem and the UI see consistent fields."""
-    out = dict(r)
-
-    # --- status: strip emoji for clean UI display ---
-    if out.get("status"):
-        out["status"] = _clean_status(str(out["status"]))
-
-    # --- expected_users: QA1 uses expected_users, QA2 uses expected_seats ---
-    eu = out.get("expected_users")
-    if eu in (None, ""):
-        es = out.get("expected_seats")
-        out["expected_users"] = _coerce_optional_int(es) if es not in (None, "") else None
-    elif not isinstance(eu, int):
-        out["expected_users"] = _coerce_optional_int(eu)
-
-    # --- actual_count: QA1 uses actual_users or actual_count, QA2 uses actual_seats ---
-    ac = out.get("actual_count")
-    if ac is None or ac == "":
-        found = False
-        for key in ("actual_seats", "actual_users"):
-            raw = out.get(key)
-            if raw is not None and raw != "":
-                out["actual_count"] = _coerce_optional_int(raw)
-                found = True
-                break
-        if not found:
-            out["actual_count"] = None
-
-    # --- deployed: derive from provisioned if missing ---
-    if not out.get("deployed") and out.get("provisioned") is not None:
-        out["deployed"] = "Yes" if out.get("provisioned") else "No"
-
-    return out
-
-
-_restore_persisted_state()
 
 
 # Cached base domain derived from the connected cluster
@@ -553,7 +296,7 @@ def _resolve_target(request: Request, requested: str | None) -> str | None:
     ):
         # Legacy operations discover Workshops by catalog name. Refuse to let
         # them select resources still owned by a dependency orchestration run.
-        loaded = {(s.namespace, s.ci) for s in _schedules}
+        loaded = {(s.namespace, s.ci) for s in ws.schedules}
         if any((p.namespace, n.ci_name) in loaded
                for p in dependency_store.owned_plans(target) for n in p.nodes):
             raise HTTPException(409, 'dependency_resources_require_dependency_lifecycle')
@@ -673,7 +416,6 @@ def _ingest_schedule_csv_text(text: str, filename: str) -> UploadResponse:
     """Parse CSV text, replace in-memory schedules, return upload response."""
     from api.services.num_users_validation import validate_num_users_in_sessions
 
-    global _schedules, _csv_filepath, _current_filename
     text = text.lstrip("\ufeff")
     if len(text.encode("utf-8")) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(413, "File exceeds 10 MB size limit")
@@ -713,9 +455,9 @@ def _ingest_schedule_csv_text(text: str, filename: str) -> UploadResponse:
             },
         )
     with _state_lock:
-        _schedules = schedules
-        _current_filename = filename
-        _csv_filepath = tmp.name
+        ws.schedules = schedules
+        ws.current_filename = filename
+        ws.csv_filepath = tmp.name
         _save_schedules()
     skipped = total_rows - len(schedules)
     return UploadResponse(
@@ -728,33 +470,33 @@ def _ingest_schedule_csv_text(text: str, filename: str) -> UploadResponse:
 
 def _filter_schedules(ci_filter: str | None) -> list[WorkshopSchedule]:
     if ci_filter:
-        filtered = [s for s in _schedules if s.ci == ci_filter]
+        filtered = [s for s in ws.schedules if s.ci == ci_filter]
         if not filtered:
             raise HTTPException(404, f"No schedules found for CI: {ci_filter}")
         return filtered
-    return list(_schedules)
+    return list(ws.schedules)
 
 
 def _archive_current_session():
     """Save the current state as a session if there's anything to save."""
     global _session_counter
-    if not _schedules and not _deployment_results:
+    if not ws.schedules and not ws.deployment_results:
         return
     _session_counter += 1
     session = {
         "session_id": str(_session_counter),
-        "filename": _current_filename,
-        "schedules": list(_schedules),
-        "deployment_results": list(_deployment_results),
-        "qa_results": list(_qa_results),
-        "destroy_check_results": list(_destroy_check_results),
+        "filename": ws.current_filename,
+        "schedules": list(ws.schedules),
+        "deployment_results": list(ws.deployment_results),
+        "qa_results": list(ws.qa_results),
+        "destroy_check_results": list(ws.destroy_check_results),
         "operator_overrides": [o.model_dump() for o in _operator_overrides],
-        "csv_filepath": _csv_filepath,
-        "schedule_count": len(_schedules),
-        "result_count": len(_deployment_results),
+        "csv_filepath": ws.csv_filepath,
+        "schedule_count": len(ws.schedules),
+        "result_count": len(ws.deployment_results),
         "timestamp": utc_timestamp_str(),
-        "deploy_log_file": os.path.basename(_deploy_log_path) if _deploy_log_path else None,
-        "qa_log_file": os.path.basename(_qa_log_path) if _qa_log_path else None,
+        "deploy_log_file": os.path.basename(ws.deploy_log_path) if ws.deploy_log_path else None,
+        "qa_log_file": os.path.basename(ws.qa_log_path) if ws.qa_log_path else None,
     }
     _sessions.append(session)
     if len(_sessions) > MAX_SESSIONS:
@@ -791,20 +533,20 @@ def _log_operator_overrides(prefix: str = "OPERATOR OVERRIDE") -> None:
 @router.post("/sessions/clear")
 def clear_session(_key=Depends(verify_api_key)):
     """Archive current session and reset state for a new upload."""
-    global _schedules, _deployment_results, _qa_results, _qa_last_scope, _csv_filepath, _current_filename, _asset_passwords, _deploy_log_path, _qa_log_path, _destroy_check_results, _operator_overrides
+    global _qa_last_scope, _operator_overrides
     with _state_lock:
         _archive_current_session()
-        _schedules = []
-        _deployment_results = []
-        _qa_results = []
+        ws.schedules = []
+        ws.deployment_results = []
+        ws.qa_results = []
         _qa_last_scope = None
-        _destroy_check_results = []
+        ws.destroy_check_results = []
         _operator_overrides = []
-        _csv_filepath = None
-        _current_filename = ""
-        _asset_passwords = None
-        _deploy_log_path = None
-        _qa_log_path = None
+        ws.csv_filepath = None
+        ws.current_filename = ""
+        ws.asset_passwords = None
+        ws.deploy_log_path = None
+        ws.qa_log_path = None
         _flow_state.clear_persisted_state()
         return {"message": "Session cleared", "session_count": len(_sessions)}
 
@@ -895,12 +637,11 @@ def clear_operator_overrides(_key=Depends(verify_api_key)):
 @router.put("/schedules")
 def update_schedules(schedules_data: list[WorkshopScheduleResponse], _key=Depends(verify_api_key)):
     """Update the entire schedules list (Pydantic-validated)."""
-    global _schedules
     new_schedules = [
         WorkshopSchedule(**s.model_dump()) for s in schedules_data
     ]
     with _state_lock:
-        _schedules = new_schedules
+        ws.schedules = new_schedules
         _save_schedules()
     return {"message": f"Updated {len(new_schedules)} schedules"}
 
@@ -908,11 +649,10 @@ def update_schedules(schedules_data: list[WorkshopScheduleResponse], _key=Depend
 @router.delete("/schedules/{index}")
 def delete_schedule(index: int, _key=Depends(verify_api_key)):
     """Delete a schedule by its index."""
-    global _schedules
     with _state_lock:
-        if index < 0 or index >= len(_schedules):
+        if index < 0 or index >= len(ws.schedules):
             raise HTTPException(404, f"Schedule index {index} not found")
-        deleted_schedule = _schedules.pop(index)
+        deleted_schedule = ws.schedules.pop(index)
         _save_schedules()
         return {"message": f"Deleted schedule: {deleted_schedule.ci_name}"}
 
@@ -924,12 +664,11 @@ def fill_missing_dates(request: FillMissingDatesRequest, _key=Depends(verify_api
     Only updates schedules that have missing or empty date fields.
     Preserves existing valid dates.
     """
-    global _schedules
     schedules_updated = 0
     fields_updated = 0
 
     with _state_lock:
-        for schedule in _schedules:
+        for schedule in ws.schedules:
             schedule_had_updates = False
             if not schedule.provisioning_date or not schedule.provisioning_date.strip():
                 schedule.provisioning_date = request.provisioning_date
@@ -971,8 +710,8 @@ def debug_config(_key=Depends(verify_api_key)):
         "redirect": config.redirect,
         "base_domain": config.base_domain,
         "kubeconfig_path": config.kubeconfig_path,
-        "schedules_count": len(_schedules),
-        "results_count": len(_deployment_results),
+        "schedules_count": len(ws.schedules),
+        "results_count": len(ws.deployment_results),
         "jobs": jobs.get_stats(),
     }
 
@@ -983,8 +722,22 @@ def debug_config(_key=Depends(verify_api_key)):
 
 @router.get("/healthz")
 async def healthz():
-    """Pod probe: API responsiveness must not depend on external clusters."""
-    return {"status": "ok"}
+    """Lightweight liveness/readiness probe — no oc / catalog calls.
+
+    Prefer this path for kube probes. Checks durable workspace DB only.
+    """
+    from api.db import healthcheck as db_healthcheck
+
+    loop = asyncio.get_running_loop()
+    db_ok = await loop.run_in_executor(None, db_healthcheck)
+    if not db_ok:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "db_ok": False, "message": "Durable workspace DB unreachable"},
+        )
+    return {"status": "ok", "db_ok": True}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -1380,7 +1133,6 @@ def load_schedule_example(request: Request, slug: str, _key=Depends(verify_api_k
 @router.post("/schedules/upload-passwords")
 async def upload_passwords(file: UploadFile = File(...), _key=Depends(verify_api_key)):
     """Upload a per-asset passwords CSV (columns: CI, Password)."""
-    global _asset_passwords
     content = await file.read()
     if len(content) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(413, "File exceeds 10 MB size limit")
@@ -1396,14 +1148,14 @@ async def upload_passwords(file: UploadFile = File(...), _key=Depends(verify_api
     passwords = load_asset_passwords(tmp.name)
     os.unlink(tmp.name)
     with _state_lock:
-        _asset_passwords = passwords
+        ws.asset_passwords = passwords
 
     return {"count": len(passwords), "message": f"Loaded {len(passwords)} asset password(s)"}
 
 
 @router.get("/schedules", response_model=list[WorkshopScheduleResponse])
 def get_schedules():
-    return [_schedule_to_response(s) for s in _schedules]
+    return [_schedule_to_response(s) for s in ws.schedules]
 
 
 def _namespace_exists(ns: str, config: RHDPConfig, env: dict[str, str]) -> bool:
@@ -1492,12 +1244,12 @@ def _session_block_display_name(
     return f"{name} ({ns})"
 
 
-def _ns_meta_from_schedules(ns: str) -> tuple[str, str, str]:
+def _ns_meta_from_schedules(ns: str, schedules: list[WorkshopSchedule] | None = None) -> tuple[str, str, str]:
     """Pick event_name / session_date / session_start for a namespace from loaded schedules."""
     event_name = ""
     session_date = ""
     session_start = ""
-    for s in _schedules:
+    for s in (schedules if schedules is not None else ws.schedules):
         if (getattr(s, "namespace", "") or "") != ns:
             continue
         if not event_name:
@@ -1614,14 +1366,71 @@ def _create_namespace(
     return False, err or f"oc create ProjectRequest failed (exit {r.returncode})"
 
 
+
+def _ensure_event_namespaces_for_schedules(
+    schedules: list[WorkshopSchedule],
+    config: RHDPConfig,
+) -> dict[str, object]:
+    """Create missing ``event-*`` projects; raise RuntimeError if any create fails."""
+    env = _config_env(config)
+    unique_ns = sorted({s.namespace for s in schedules if (s.namespace or "").startswith("event-")})
+    created: list[str] = []
+    failed: list[dict[str, str]] = []
+    results: dict[str, bool] = {}
+
+    for ns in unique_ns:
+        _validate_namespace(ns)
+        event_name, session_date, session_start = _ns_meta_from_schedules(ns, schedules)
+        display_name = _session_block_display_name(event_name, session_date, session_start, ns)
+        if _namespace_exists(ns, config, env):
+            results[ns] = True
+            _stamp_event_namespace(ns, config, env, display_name=display_name)
+            continue
+        ok, err = _create_namespace(ns, config, env, display_name=display_name)
+        if ok:
+            results[ns] = True
+            created.append(ns)
+        else:
+            results[ns] = False
+            failed.append({"namespace": ns, "error": err})
+
+    if failed:
+        detail = "; ".join(f"{f['namespace']}: {f['error']}" for f in failed[:5])
+        raise RuntimeError(f"Failed to create event namespace(s): {detail}")
+    return {"namespaces": results, "created": created, "failed": failed}
+
+
+def _deploy_results_all_failed(results: list[DeploymentResult]) -> bool:
+    """True when every result is a hard failure (nothing usable landed)."""
+    if not results:
+        return False
+
+    def _failed(r: DeploymentResult) -> bool:
+        st = str(getattr(r, "status", "") or "").lower()
+        if st in {"failed", "error"}:
+            return True
+        guid = str(getattr(r, "guid", "") or "").lower()
+        if guid in {"", "failed"}:
+            return True
+        err = str(getattr(r, "error_message", "") or "").strip()
+        return bool(err) and st not in {
+            "verified",
+            "deployed",
+            "deployed_unverified",
+            "deployed_no_url",
+        }
+
+    return all(_failed(r) for r in results)
+
+
 @router.post("/schedules/validate-namespaces")
 def validate_namespaces(_key=Depends(verify_api_key), config=Depends(_request_config)):
     """Check whether the namespaces referenced by loaded schedules exist on the cluster."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     env = _config_env(config)
 
-    unique_ns = {s.namespace for s in _schedules}
+    unique_ns = {s.namespace for s in ws.schedules}
     for ns in unique_ns:
         _validate_namespace(ns)
     results: dict[str, bool] = {ns: _namespace_exists(ns, config, env) for ns in unique_ns}
@@ -1635,17 +1444,18 @@ def ensure_namespaces(
     _key=Depends(verify_api_key),
     config=Depends(_request_config),
 ):
-    """Ensure schedule namespaces exist; optionally create any that are missing.
+    """Ensure schedule namespaces exist; create missing ``event-*`` projects only.
 
     Event session-block projects are created via ProjectRequest and stamped with
     ``usernamespace.gpte.redhat.com/user-uid=EVENT`` plus an
     ``openshift.io/display-name`` of ``<event> — <date> <start>``.
+    User namespaces (``user-*``) are reported as missing but never auto-created.
     """
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     env = _config_env(config)
 
-    unique_ns = sorted({s.namespace for s in _schedules if s.namespace})
+    unique_ns = sorted({s.namespace for s in ws.schedules if s.namespace})
     for ns in unique_ns:
         _validate_namespace(ns)
 
@@ -1661,7 +1471,8 @@ def ensure_namespaces(
             if str(ns).startswith("event-"):
                 _stamp_event_namespace(ns, config, env, display_name=display_name)
             continue
-        if not create_missing:
+        # Only auto-create Labagator session-block projects (event-*).
+        if not create_missing or not str(ns).startswith("event-"):
             results[ns] = False
             continue
         ok, err = _create_namespace(ns, config, env, display_name=display_name)
@@ -1684,7 +1495,7 @@ def ensure_namespaces(
 @router.post("/schedules/validate-num-users", response_model=NumUsersValidationResponse)
 def validate_num_users(_key=Depends(verify_api_key), config=Depends(_request_config)):
     """Check whether any loaded schedules exceed the catalog item's num_users maximum."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     violations: list[NumUsersViolation] = []
     users_not_in_catalog: list[UsersNotInCatalogAdvisory] = []
@@ -1736,7 +1547,7 @@ def validate_num_users(_key=Depends(verify_api_key), config=Depends(_request_con
                     default_value=info.get("default"),
                 ))
 
-    for s in _schedules:
+    for s in ws.schedules:
         _check_ci(s.ci, s)
         # Also check individual asset CIs for multi-asset workshops
         if s.is_multi_asset and s.asset_cis:
@@ -1763,7 +1574,7 @@ def validate_parameters(_key=Depends(verify_api_key), config=Depends(_request_co
     blockers (enum mismatch); 'warnings' are advisory (value set for a parameter the item does
     not expose, or a required parameter with no default that flow does not supply).
     """
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     violations: list[ParameterValidationViolation] = []
     warnings: list[ParameterValidationViolation] = []
@@ -1793,7 +1604,7 @@ def validate_parameters(_key=Depends(verify_api_key), config=Depends(_request_co
                 seen.add(key)
                 warnings.append(ParameterValidationViolation(**entry))
 
-    for s in _schedules:
+    for s in ws.schedules:
         _check_ci(s.ci, s)
         if s.is_multi_asset and s.asset_cis:
             for asset_ci in (c.strip() for c in s.asset_cis.split(",") if c.strip()):
@@ -1813,13 +1624,13 @@ def validate_catalog_namespaces(_key=Depends(verify_api_key), config=Depends(_re
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
 
     # Build unique (ci, expected_ns) pairs to check
     to_check: list[tuple[str, str, WorkshopSchedule]] = []
     seen_cis: set[str] = set()
-    for s in _schedules:
+    for s in ws.schedules:
         cis = [s.ci]
         if s.is_multi_asset and s.asset_cis:
             cis += [c.strip() for c in s.asset_cis.split(",") if c.strip()]
@@ -1890,7 +1701,7 @@ def validate_catalog_namespaces(_key=Depends(verify_api_key), config=Depends(_re
             message=msg,
         ))
 
-    for s in _schedules:
+    for s in ws.schedules:
         cis = [s.ci]
         if s.is_multi_asset and s.asset_cis:
             cis += [c.strip() for c in s.asset_cis.split(",") if c.strip()]
@@ -1947,13 +1758,13 @@ def validate_catalog_namespaces(_key=Depends(verify_api_key), config=Depends(_re
 @router.post("/schedules/validate-cluster-tenant", response_model=ClusterTenantValidationResponse)
 def validate_cluster_tenant_scheduling(_key=Depends(verify_api_key), config=Depends(_request_config)):
     """Check that cluster catalog items are scheduled before tenant catalog items."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
 
-    analyze_cluster_tenant_relationships(_schedules, config=config)
-    validation = _tenant_validation(_schedules, config)
+    analyze_cluster_tenant_relationships(ws.schedules, config=config)
+    validation = _tenant_validation(ws.schedules, config)
 
-    tenants_checked = sum(1 for s in _schedules if s.is_tenant)
+    tenants_checked = sum(1 for s in ws.schedules if s.is_tenant)
     clusters_found = sum(1 for r in validation["relationships"] if r.get("status") in ("valid", "timing_violation", "found_on_cluster"))
 
     return ClusterTenantValidationResponse(
@@ -1974,15 +1785,14 @@ def auto_fix_cluster_tenant_timing(buffer_hours: float = 4.0, _key=Depends(verif
     Args:
         buffer_hours: Hours to deploy cluster before tenant (default: 4.0)
     """
-    global _schedules
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
 
     from lib.cluster_tenant_validation import auto_fix_cluster_tenant_timing
 
     buffer_minutes = int(buffer_hours * 60)
-    result = auto_fix_cluster_tenant_timing(_schedules, buffer_minutes=buffer_minutes)
-    _schedules = result["schedules"]
+    result = auto_fix_cluster_tenant_timing(ws.schedules, buffer_minutes=buffer_minutes)
+    ws.schedules = result["schedules"]
     _save_schedules()
 
     return {
@@ -1997,9 +1807,9 @@ def auto_fix_cluster_tenant_timing(buffer_hours: float = 4.0, _key=Depends(verif
 
 @router.post("/schedules/validate-pool-capacity", response_model=PoolCapacityValidationResponse)
 def validate_pool_capacity(_key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
-    refs = _tenant_refs(_schedules, config)
+    refs = _tenant_refs(ws.schedules, config)
     return PoolCapacityValidationResponse(
         tenant_items_checked=refs["total_tenant_count"],
         pools_queried=len({r["cluster_ref"] for tier in ("ready", "pool_no_capacity") for r in refs[tier]}),
@@ -2020,7 +1830,7 @@ def validate_pool_capacity(_key=Depends(verify_api_key), config=Depends(_request
 @router.post("/schedules/diff", response_model=DiffResponse)
 async def diff_schedules(file: UploadFile = File(...), _key=Depends(verify_api_key)):
     """Compare a new CSV against the currently loaded schedules."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded to compare against.")
 
     content = await file.read()
@@ -2044,7 +1854,7 @@ async def diff_schedules(file: UploadFile = File(...), _key=Depends(verify_api_k
     os.unlink(tmp.name)
 
     # Build keyed maps: (ci, namespace) -> schedule
-    old_map = {(s.ci, s.namespace): s for s in _schedules}
+    old_map = {(s.ci, s.namespace): s for s in ws.schedules}
     new_map = {(s.ci, s.namespace): s for s in new_schedules}
 
     added = []
@@ -2094,10 +1904,17 @@ async def _run_deploy_over(
     """Run the deploy loop over an explicit, LOCAL ``schedules`` list.
 
     Operates purely on its arguments — it MUST NOT read or write the module
-    globals ``_schedules`` / ``_deployment_results``. Honors pause/cancel via
+    globals ``ws.schedules`` / ``ws.deployment_results``. Honors pause/cancel via
     ``job_id`` and pushes progress through ``jobs.update_job``. Returns the list
     of ``DeploymentResult`` for the caller to persist however it likes.
+
+    Creates missing ``event-*`` OpenShift projects (ProjectRequest) before any
+    Workshop create. Failure to create an event namespace raises and fails the job.
     """
+    if not config.dry_run:
+        jobs.update_job(job_id, message="Ensuring event namespaces…")
+        await asyncio.to_thread(_ensure_event_namespaces_for_schedules, schedules, config)
+
     grouped_multi: dict[str, list[WorkshopSchedule]] = {}
     regular_schedules: list[WorkshopSchedule] = []
     for s in schedules:
@@ -2169,13 +1986,13 @@ async def _run_deploy_over(
 @router.post("/deploy", response_model=JobResponse)
 @_rate_limit("10/minute")
 async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=Depends(verify_api_key)):  # type: ignore
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
     # Clear stale QA results so a fresh deploy doesn't inherit prior-cycle coverage.
-    global _qa_results, _qa_last_scope
+    global _qa_last_scope
     with _state_lock:
-        _qa_results = []
+        ws.qa_results = []
         _qa_last_scope = None
         _save_qa_results()
 
@@ -2267,10 +2084,9 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
     if not body.dry_run:
         await asyncio.to_thread(preflight)
 
-    job = jobs.create_job()
+    job = jobs.create_job(current_workspace_id.get())
 
     async def _run():
-        global _deploy_log_path
         handler, log_path = start_log_capture("deploy", job.job_id)
         config = None
         try:
@@ -2310,13 +2126,12 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
             )
             _log_operator_overrides()
             results = await _run_deploy_over(
-                schedules, config, job.job_id, _asset_passwords, pace_seconds=pace
+                schedules, config, job.job_id, ws.asset_passwords, pace_seconds=pace
             )
 
-            global _deployment_results
             with _state_lock:
-                _deployment_results = results
-                _deploy_log_path = log_path
+                ws.deployment_results = results
+                ws.deploy_log_path = log_path
             _save_results(results)
 
             if jobs.is_cancel_requested(job.job_id):
@@ -2324,6 +2139,20 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                     job.job_id,
                     status=jobs.Status.cancelled,
                     message=f"Cancelled after {len(results)} of {total} deployment(s)",
+                    results=[asdict(r) for r in results],
+                    log_path=log_path,
+                )
+            elif _deploy_results_all_failed(results):
+                sample = next(
+                    (r.error_message for r in results if getattr(r, "error_message", None)),
+                    "all workshop creates failed",
+                )
+                jobs.update_job(
+                    job.job_id,
+                    status=jobs.Status.failed,
+                    progress=100,
+                    error=sample,
+                    message=f"Failed: all {len(results)} deployment(s) failed — {sample}",
                     results=[asdict(r) for r in results],
                     log_path=log_path,
                 )
@@ -2338,7 +2167,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
                 )
         except Exception as exc:
             with _state_lock:
-                _deploy_log_path = log_path
+                ws.deploy_log_path = log_path
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.failed,
@@ -2352,7 +2181,7 @@ async def deploy(request: Request, body: DeployRequest = DeployRequest(), _key=D
             stop_log_capture(handler)
 
     asyncio.create_task(_run())
-    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress)
+    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress, workspace_id=job.workspace_id)
 
 
 @router.post("/deploy/session", response_model=JobResponse)
@@ -2370,10 +2199,10 @@ async def deploy_session(
     """Deploy an explicitly-uploaded CSV, deploying the LOCAL parsed list.
 
     Correctness is isolated: the deploy runs off the CSV parsed in THIS request,
-    never off the shared ``_schedules`` global — so concurrent callers cannot
+    never off the shared ``ws.schedules`` global — so concurrent callers cannot
     make it deploy the wrong set. For visibility, it also mirrors those
     schedules and the resulting deployment records into Flow's global state
-    (``_schedules`` / ``_deployment_results``) so the deploy shows up in the
+    (``ws.schedules`` / ``ws.deployment_results``) so the deploy shows up in the
     Flow dashboard (Upload + Deployments tabs). That mirror is display-only and
     best-effort (a concurrent human upload may overwrite the displayed set).
     Per-workshop results are also on the job (``GET /api/deploy/status/{id}``).
@@ -2404,9 +2233,8 @@ async def deploy_session(
 
     # Mirror parsed schedules into Flow's global state for dashboard visibility
     # (Upload tab). Display-only: the deploy below uses the LOCAL `schedules`.
-    global _schedules
     with _state_lock:
-        _schedules = schedules
+        ws.schedules = schedules
         _save_schedules()
 
     try:
@@ -2421,7 +2249,7 @@ async def deploy_session(
         _stamp_operator_email(config, request)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    job = jobs.create_job()
+    job = jobs.create_job(current_workspace_id.get())
 
     async def _run():
         try:
@@ -2441,18 +2269,30 @@ async def deploy_session(
             # than replace: merge new results into the existing set (latest wins
             # per ci+namespace) so the dashboard keeps history across deploys
             # instead of showing only the most recent one.
-            global _deployment_results
             with _state_lock:
-                merged = {(r.ci, r.namespace): r for r in _deployment_results}
+                merged = {(r.ci, r.namespace): r for r in ws.deployment_results}
                 for r in results:
                     merged[(r.ci, r.namespace)] = r
-                _deployment_results = list(merged.values())
-                _save_results(_deployment_results)
+                ws.deployment_results = list(merged.values())
+                _save_results(ws.deployment_results)
             if jobs.is_cancel_requested(job.job_id):
                 jobs.update_job(
                     job.job_id,
                     status=jobs.Status.cancelled,
                     message=f"Cancelled after {len(results)} deployment(s)",
+                    results=[asdict(r) for r in results],
+                )
+            elif _deploy_results_all_failed(results):
+                sample = next(
+                    (r.error_message for r in results if getattr(r, "error_message", None)),
+                    "all workshop creates failed",
+                )
+                jobs.update_job(
+                    job.job_id,
+                    status=jobs.Status.failed,
+                    progress=100,
+                    error=sample,
+                    message=f"Failed: all {len(results)} deployment(s) failed — {sample}",
                     results=[asdict(r) for r in results],
                 )
             else:
@@ -2475,14 +2315,13 @@ async def deploy_session(
                 cluster_targets.cleanup_kubeconfig(config.kubeconfig_path)
 
     asyncio.create_task(_run())
-    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress)
+    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress, workspace_id=job.workspace_id)
 
 
 @router.post("/deploy/dry-run", response_model=list[DeploymentResultResponse])
 @_rate_limit("10/minute")
 def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key=Depends(verify_api_key)):  # type: ignore
-    global _deploy_log_path
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
     target = _resolve_target(request, body.target_cluster)
@@ -2545,13 +2384,12 @@ def deploy_dry_run(request: Request, body: DeployRequest = DeployRequest(), _key
                 ))
 
         for s in regular_schedules:
-            result = process_schedule(s, config, asset_passwords=_asset_passwords)
+            result = process_schedule(s, config, asset_passwords=ws.asset_passwords)
             results.append(result)
 
-        global _deployment_results
         with _state_lock:
-            _deployment_results = results
-            _deploy_log_path = log_path
+            ws.deployment_results = results
+            ws.deploy_log_path = log_path
         _save_results(results)
         return [_result_to_response(r) for r in results]
     finally:
@@ -2568,7 +2406,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
     Writes ResourceClaim / Workshop / WorkshopProvision YAMLs to a temp directory during
     dry-run, then returns them as one file separated by ``---``. Requires schedules loaded.
     """
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
     target = _resolve_target(request, body.target_cluster)
@@ -2607,7 +2445,7 @@ def deploy_dry_run_yaml(request: Request, body: DeployRequest = DeployRequest(),
             create_multi_workshop_from_group(group_scheds, config)
 
         for s in regular_schedules:
-            process_schedule(s, config, asset_passwords=_asset_passwords)
+            process_schedule(s, config, asset_passwords=ws.asset_passwords)
 
         yaml_paths = sorted(Path(tmpdir).glob("*.yaml"))
         if not yaml_paths:
@@ -2664,6 +2502,7 @@ def deploy_status(job_id: str):
         error=job.error,
         results=[DeploymentResultResponse(**r) for r in (job.results or [])],
         log_file=os.path.basename(job.log_path) if job.log_path else None,
+        workspace_id=job.workspace_id,
     )
 
 
@@ -2776,7 +2615,7 @@ def deploy_resume(job_id: str, _key=Depends(verify_api_key)):
 
 @router.get("/deploy/results", response_model=list[DeploymentResultResponse])
 def get_deploy_results():
-    return [_result_to_response(r) for r in _deployment_results]
+    return [_result_to_response(r) for r in ws.deployment_results]
 
 
 @router.post("/deploy/results/delete")
@@ -2787,14 +2626,13 @@ def delete_deploy_results(body: DeleteResultsRequest, _key=Depends(verify_api_ke
     This is a view-only cleanup — it does NOT undeploy or destroy anything on the
     cluster. Rows are matched by (ci, namespace), the key results are stored under.
     """
-    global _deployment_results
     refs = {(i.ci, i.namespace) for i in body.items}
     with _state_lock:
-        before = len(_deployment_results)
-        _deployment_results = [r for r in _deployment_results if (r.ci, r.namespace) not in refs]
-        deleted = before - len(_deployment_results)
-        _save_results(_deployment_results)
-    return {"deleted": deleted, "remaining": len(_deployment_results)}
+        before = len(ws.deployment_results)
+        ws.deployment_results = [r for r in ws.deployment_results if (r.ci, r.namespace) not in refs]
+        deleted = before - len(ws.deployment_results)
+        _save_results(ws.deployment_results)
+    return {"deleted": deleted, "remaining": len(ws.deployment_results)}
 
 
 @router.post("/deploy/results/clear")
@@ -2805,11 +2643,10 @@ def clear_deploy_results(_key=Depends(verify_api_key)):
     This is a view-only cleanup — it does NOT undeploy or destroy anything on the
     cluster.
     """
-    global _deployment_results
     with _state_lock:
-        cleared = len(_deployment_results)
-        _deployment_results = []
-        _save_results(_deployment_results)
+        cleared = len(ws.deployment_results)
+        ws.deployment_results = []
+        _save_results(ws.deployment_results)
     return {"cleared": cleared, "remaining": 0}
 
 
@@ -2820,10 +2657,10 @@ def clear_qa_results(_key=Depends(verify_api_key)):
     Clears the in-memory results list and the persisted snapshot.
     This is a view-only cleanup — it does NOT affect running QA jobs or cluster state.
     """
-    global _qa_results, _qa_last_scope
+    global _qa_last_scope
     with _state_lock:
-        cleared = len(_qa_results)
-        _qa_results = []
+        cleared = len(ws.qa_results)
+        ws.qa_results = []
         _qa_last_scope = None
         _save_qa_results()
     return {"cleared": cleared, "remaining": 0}
@@ -2836,7 +2673,7 @@ def deploy_preview(body: DeployRequest = DeployRequest(), _key=Depends(verify_ap
     Returns a plan without deploying anything. Useful for reviewing
     how users will be distributed across AWS regions before committing.
     """
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
     schedules = _filter_schedules(body.ci_filter)
 
@@ -2876,11 +2713,11 @@ def deploy_preview(body: DeployRequest = DeployRequest(), _key=Depends(verify_ap
 @_rate_limit("10/minute")
 async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify_api_key)):
     """Re-deploy specific workshops by CI name (typically failed ones)."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded. Upload a CSV first.")
 
     ci_name_set = set(body.ci_names)
-    matching = [s for s in _schedules if s.ci_name in ci_name_set]
+    matching = [s for s in ws.schedules if s.ci_name in ci_name_set]
     if not matching:
         raise HTTPException(404, f"No schedules match the provided CI names: {body.ci_names}")
 
@@ -2928,10 +2765,9 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
     if not body.dry_run:
         await asyncio.to_thread(preflight)
 
-    job = jobs.create_job()
+    job = jobs.create_job(current_workspace_id.get())
 
     async def _run():
-        global _deploy_log_path
         handler, log_path = start_log_capture("deploy-retry", job.job_id)
         config = None
         try:
@@ -2950,7 +2786,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
             results = []
             for i, s in enumerate(matching):
                 result = await asyncio.to_thread(
-                    process_schedule, s, config, _asset_passwords
+                    process_schedule, s, config, ws.asset_passwords
                 )
                 results.append(result)
                 pct = int((i + 1) / len(matching) * 100)
@@ -2962,14 +2798,13 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
                     await asyncio.sleep(pace)
 
             # Update global results: replace matching entries, keep the rest
-            global _deployment_results
             result_map = {r.ci_name: r for r in results}
             with _state_lock:
-                _deployment_results = [
-                    result_map.get(r.ci_name, r) for r in _deployment_results
-                ] + [r for r in results if r.ci_name not in {dr.ci_name for dr in _deployment_results}]
-                _deploy_log_path = log_path
-            _save_results(_deployment_results)
+                ws.deployment_results = [
+                    result_map.get(r.ci_name, r) for r in ws.deployment_results
+                ] + [r for r in results if r.ci_name not in {dr.ci_name for dr in ws.deployment_results}]
+                ws.deploy_log_path = log_path
+            _save_results(ws.deployment_results)
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.completed,
@@ -2980,7 +2815,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
             )
         except Exception as exc:
             with _state_lock:
-                _deploy_log_path = log_path
+                ws.deploy_log_path = log_path
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.failed,
@@ -2994,7 +2829,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
             stop_log_capture(handler)
 
     asyncio.create_task(_run())
-    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress)
+    return JobResponse(job_id=job.job_id, status=JobStatus(job.status.value), progress=job.progress, workspace_id=job.workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -3004,7 +2839,7 @@ async def deploy_retry(request: Request, body: RetryRequest, _key=Depends(verify
 @router.post("/operations/lock", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_lock(request: Request, body: LockRequest = LockRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     lock_workshops(schedules, config)
@@ -3014,7 +2849,7 @@ def op_lock(request: Request, body: LockRequest = LockRequest(), _key=Depends(ve
 @router.post("/operations/unlock", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_unlock(request: Request, body: LockRequest = LockRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     unlock_workshops(schedules, config)
@@ -3024,7 +2859,7 @@ def op_unlock(request: Request, body: LockRequest = LockRequest(), _key=Depends(
 @router.post("/operations/extend-stop", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_extend_stop(request: Request, body: ExtendRequest, _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     if body.days == 0 and body.hours == 0:
         raise HTTPException(400, "Must specify days and/or hours > 0")
@@ -3039,7 +2874,7 @@ def op_extend_stop(request: Request, body: ExtendRequest, _key=Depends(verify_ap
 @router.post("/operations/extend-destroy", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_extend_destroy(request: Request, body: ExtendRequest, _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     if body.days == 0 and body.hours == 0:
         raise HTTPException(400, "Must specify days and/or hours > 0")
@@ -3054,7 +2889,7 @@ def op_extend_destroy(request: Request, body: ExtendRequest, _key=Depends(verify
 @router.post("/operations/disable-autostop", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_disable_autostop(request: Request, body: DisableAutostopRequest = DisableAutostopRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     patched = disable_autostop(schedules, config)
@@ -3067,7 +2902,7 @@ def op_disable_autostop(request: Request, body: DisableAutostopRequest = Disable
 @router.post("/operations/scale", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_scale(request: Request, body: ScaleRequest, _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     scale_workshops(schedules, config, body.target_count)
@@ -3080,7 +2915,7 @@ def op_scale(request: Request, body: ScaleRequest, _key=Depends(verify_api_key),
 @router.post("/operations/showroom-cleanup", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_showroom_cleanup(request: Request, body: ShowroomCleanupRequest = ShowroomCleanupRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     cleaned, failed, failed_details = teardown_showroom(schedules, config)
@@ -3096,7 +2931,7 @@ def op_showroom_cleanup(request: Request, body: ShowroomCleanupRequest = Showroo
 @router.post("/operations/showroom-health", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_showroom_health(request: Request, body: ShowroomHealthRequest = ShowroomHealthRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     results = []
@@ -3119,9 +2954,9 @@ def op_showroom_preflight(request: Request, body: ShowroomPreflightRequest = Sho
     Uses deployment results' landing page URLs to verify workshops are browser-accessible.
     Falls back to the url field when no landing page URL is available.
     """
-    if not _deployment_results:
+    if not ws.deployment_results:
         raise HTTPException(400, "No deployment results available. Deploy first, then run preflight.")
-    results_to_check = _deployment_results
+    results_to_check = ws.deployment_results
     if body.ci_filter:
         results_to_check = [r for r in results_to_check if r.ci == body.ci_filter or r.ci_name == body.ci_filter]
     if not results_to_check:
@@ -3153,7 +2988,7 @@ def op_showroom_preflight(request: Request, body: ShowroomPreflightRequest = Sho
 @router.post("/operations/showroom-applicationset")
 @_rate_limit("10/minute")
 def op_showroom_applicationset(request: Request, body: ShowroomAppSetRequest = ShowroomAppSetRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):  # type: ignore
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     yamls = []
@@ -3175,7 +3010,7 @@ def op_showroom_applicationset(request: Request, body: ShowroomAppSetRequest = S
 @router.post("/operations/update-passwords", response_model=OperationResponse)
 @_rate_limit("10/minute")
 def op_update_passwords(request: Request, body: LockRequest = LockRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
     schedules = _filter_schedules(body.ci_filter)
     updated = update_passwords(schedules, config)
@@ -3269,18 +3104,18 @@ def babylon_workshop_state(namespace: str, name: str, _key=Depends(verify_api_ke
 @router.get("/qa/namespaces")
 def qa_namespaces():
     """Return unique namespaces from loaded schedules for the QA namespace selector."""
-    if not _schedules:
+    if not ws.schedules:
         return []
-    return list(dict.fromkeys(s.namespace for s in _schedules if s.namespace))
+    return list(dict.fromkeys(s.namespace for s in ws.schedules if s.namespace))
 
 
 @router.get("/qa/scopes")
 def qa_scopes(namespace: str | None = None):
     """Ops Floor day options derived from loaded schedules (Session Date / provisioning day)."""
-    if not _schedules:
+    if not ws.schedules:
         return {"total": 0, "unknown_date_count": 0, "dates": []}
     ns = namespace.strip() if namespace else None
-    return build_qa_scopes(_schedules, namespace=ns or None)
+    return build_qa_scopes(ws.schedules, namespace=ns or None)
 
 
 def _run_qa_over(
@@ -3367,7 +3202,7 @@ def _run_qa_over(
             deploy_schedules = [
                 s
                 for s in filter_schedules_by_scope(
-                    _schedules,
+                    ws.schedules,
                     floor=floor,
                     floor_date=floor_date,
                     time_band=time_band,
@@ -3403,7 +3238,7 @@ def _run_qa_over(
             catalog_schedules = [
                 s
                 for s in filter_schedules_by_scope(
-                    _schedules,
+                    ws.schedules,
                     floor=floor,
                     floor_date=floor_date,
                     time_band=time_band,
@@ -3498,7 +3333,6 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     When nothing matches, Flow auto-loads from Labagator (or discovers labeled
     Workshops on the cluster) so Ops QA does not depend on a prior CSV upload.
     """
-    global _schedules, _current_filename
 
     from api.services.qa_schedule_resolve import (
         ensure_label_scoped_schedules,
@@ -3525,7 +3359,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         raise HTTPException(400, "floor_date is required when floor=day (Ops Floor day pin).")
 
     label_scoped_request = bool(event_id or session_date or session_start)
-    if not _schedules and not label_scoped_request:
+    if not ws.schedules and not label_scoped_request:
         raise HTTPException(400, "No schedules loaded.")
 
     # Resolve the effective target, but defer credential setup to the background
@@ -3536,7 +3370,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
     target = await asyncio.to_thread(_resolve_target, request, _requested_target(request))
 
     label_scoped = filter_schedules_by_scope(
-        _schedules,
+        ws.schedules,
         floor=floor,
         floor_date=floor_date,
         time_band=time_band,
@@ -3545,10 +3379,10 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         session_start=session_start,
     )
     if label_scoped_request and not label_scoped:
-        prior_len = len(_schedules)
+        prior_len = len(ws.schedules)
         updated, label_scoped = await asyncio.to_thread(
             ensure_label_scoped_schedules,
-            list(_schedules),
+            list(ws.schedules),
             event_id=event_id,
             floor=floor,
             floor_date=floor_date,
@@ -3560,9 +3394,9 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         # Persist auto-loaded / discovered rows so subsequent QA / UI see them.
         if label_scoped or len(updated) != prior_len:
             with _state_lock:
-                _schedules = updated
-                if not _current_filename:
-                    _current_filename = f"qa-auto-event-{event_id or 'unknown'}.csv"
+                ws.schedules = updated
+                if not ws.current_filename:
+                    ws.current_filename = f"qa-auto-event-{event_id or 'unknown'}.csv"
                 _save_schedules()
 
     # Support multiple namespaces for faster targeted QA. When event_id (and
@@ -3585,7 +3419,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 ),
             )
     else:
-        namespaces = list(dict.fromkeys(s.namespace for s in _schedules))
+        namespaces = list(dict.fromkeys(s.namespace for s in ws.schedules))
 
     # When a CI Name subset / label scope is requested, only touch namespaces that still have matches.
     if ci_names or event_id or session_date or session_start:
@@ -3602,10 +3436,10 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         namespaces = [ns for ns in namespaces if ns in ns_with_matches]
 
     qa_type = body.type.value
-    job = jobs.create_job()
+    job = jobs.create_job(current_workspace_id.get())
 
     async def _run():
-        global _qa_results, _qa_log_path, _qa_last_scope
+        global _qa_last_scope
         handler, log_path = start_log_capture("qa", job.job_id)
         config = None
         try:
@@ -3635,7 +3469,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
             # Coverage metadata: what this run actually QA'd (floor/band/CI subset
             # + per-row list). Labagator consumes this instead of guessing scope.
             coverage = build_qa_coverage(
-                _schedules,
+                ws.schedules,
                 floor=floor,
                 floor_date=floor_date,
                 time_band=time_band,
@@ -3655,12 +3489,12 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
             new_keys = {(r.namespace, r.ci_name, qa_type) for r in new_results}
             with _state_lock:
                 kept = [
-                    r for r in _qa_results
+                    r for r in ws.qa_results
                     if (r.namespace, r.ci_name, getattr(r, "qa_type", "")) not in new_keys
                 ]
                 all_results = kept + new_results
-                _qa_results = all_results
-                _qa_log_path = log_path
+                ws.qa_results = all_results
+                ws.qa_log_path = log_path
                 # Subset/retry merges coverage onto the prior scope; a full run of
                 # a stage replaces it with what this run actually covered.
                 if ci_names:
@@ -3712,7 +3546,7 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 )
         except Exception as exc:
             with _state_lock:
-                _qa_log_path = log_path
+                ws.qa_log_path = log_path
             jobs.update_job(
                 job.job_id,
                 status=jobs.Status.failed,
@@ -3733,12 +3567,13 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
         status=JobStatus(job.status.value),
         progress=job.progress,
         message=f"QA{qa_type} started",
+        workspace_id=job.workspace_id,
     )
 
 
 @router.get("/qa/results")
 def qa_get_results():
-    return {"count": len(_qa_results), "results": _qa_results, "scope": _qa_last_scope}
+    return {"count": len(ws.qa_results), "results": ws.qa_results, "scope": _qa_last_scope}
 
 
 @router.get("/qa/status/{job_id}", response_model=JobResponse)
@@ -3754,6 +3589,7 @@ def qa_status(job_id: str):
         message=job.message,
         error=job.error,
         log_file=os.path.basename(job.log_path) if job.log_path else None,
+        workspace_id=job.workspace_id,
     )
 
 
@@ -3778,8 +3614,7 @@ def qa_cancel(job_id: str, _key=Depends(verify_api_key)):
 @_rate_limit("10/minute")
 def qa_destroy_check_endpoint(request: Request, body: DestroyCheckRequest = DestroyCheckRequest(), _key=Depends(verify_api_key), config=Depends(_request_config)):  # type: ignore
     """Read-only check whether deployments have been properly destroyed/stopped."""
-    global _destroy_check_results
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
 
     all_results: list[dict] = []
@@ -3788,7 +3623,7 @@ def qa_destroy_check_endpoint(request: Request, body: DestroyCheckRequest = Dest
     if body.namespace:
         namespaces = [body.namespace]
     else:
-        namespaces = list(dict.fromkeys(s.namespace for s in _schedules))
+        namespaces = list(dict.fromkeys(s.namespace for s in ws.schedules))
 
     handler, log_path = start_log_capture("destroy-check")
     try:
@@ -3799,7 +3634,7 @@ def qa_destroy_check_endpoint(request: Request, body: DestroyCheckRequest = Dest
             all_results.extend(r)
 
         with _state_lock:
-            _destroy_check_results = all_results
+            ws.destroy_check_results = all_results
         return DestroyCheckResponse(
             count=len(all_results),
             results=[DestroyCheckResult(**item) for item in all_results]
@@ -3813,7 +3648,7 @@ def qa_destroy_check_endpoint(request: Request, body: DestroyCheckRequest = Dest
 @router.get("/qa/destroy-check/results")
 def qa_destroy_check_results():
     """Return stored destroy-check results."""
-    return {"count": len(_destroy_check_results), "results": _destroy_check_results}
+    return {"count": len(ws.destroy_check_results), "results": ws.destroy_check_results}
 
 
 # ---------------------------------------------------------------------------
@@ -3857,7 +3692,7 @@ def download_log(filename: str):
 
 @router.get("/export/results")
 def export_results():
-    if not _deployment_results:
+    if not ws.deployment_results:
         raise HTTPException(404, "No deployment results available.")
 
     output = io.StringIO()
@@ -3871,7 +3706,7 @@ def export_results():
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
-    for r in _deployment_results:
+    for r in ws.deployment_results:
         writer.writerow(asdict(r))
 
     output.seek(0)
@@ -3965,7 +3800,7 @@ def download_template():
 
 @router.get("/export/students")
 def export_students():
-    if not _qa_results:
+    if not ws.qa_results:
         raise HTTPException(404, "No QA results available. Run QA first.")
 
     import tempfile
@@ -3973,7 +3808,7 @@ def export_students():
         mode="w", suffix=".csv", delete=False, encoding="utf-8"
     )
     tmp.close()
-    export_student_landing_page_csv([item.model_dump() for item in _qa_results], tmp.name)
+    export_student_landing_page_csv([item.model_dump() for item in ws.qa_results], tmp.name)
 
     def _iter():
         with open(tmp.name) as f:
@@ -3990,7 +3825,7 @@ def export_students():
 @router.get("/schedules/export-for-labagator")
 async def export_for_labagator(_key=Depends(verify_api_key)):
     """Export current Flow schedules as Labagator-compatible CSV."""
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded")
 
     output = io.StringIO()
@@ -3998,7 +3833,7 @@ async def export_for_labagator(_key=Depends(verify_api_key)):
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
 
-    for s in _schedules:
+    for s in ws.schedules:
         # Parse Flow dates (DD/MM/YYYY HH:MM → YYYY-MM-DD, HH:MM)
         start_dt = datetime.strptime(s.provisioning_date, "%d/%m/%Y %H:%M")
         stop_dt = datetime.strptime(s.auto_stop, "%d/%m/%Y %H:%M")
@@ -4030,9 +3865,9 @@ async def export_for_labagator(_key=Depends(verify_api_key)):
 
 @router.get("/schedules/cluster-needs", response_model=ClusterNeedsResponse)
 def get_cluster_needs(_key=Depends(verify_api_key), config=Depends(_request_config)):
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
-    refs = _tenant_refs(_schedules, config)
+    refs = _tenant_refs(ws.schedules, config)
     # Workshop Manager sizes each dedicated pool from spec.count and
     # sandboxHost.max_placements. CSV row counts are not placement demand.
     return ClusterNeedsResponse(total_tenant_count=refs["total_tenant_count"])
@@ -4048,13 +3883,13 @@ def check_tenant_cluster_refs(_key=Depends(verify_api_key), config=Depends(_requ
     Returns:
         Dict with missing_refs list and total_tenant_count
     """
-    if not _schedules:
+    if not ws.schedules:
         raise HTTPException(400, "No schedules loaded.")
 
     try:
         from lib.tenant_cluster_capacity import check_tenant_cluster_references
 
-        result = check_tenant_cluster_references(_schedules, env=_config_env(config))
+        result = check_tenant_cluster_references(ws.schedules, env=_config_env(config))
         return result
     except ImportError as e:
         logger.warning(f"Tenant cluster reference check unavailable: {e}")
