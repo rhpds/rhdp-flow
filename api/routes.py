@@ -3763,11 +3763,25 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 r.qa_type = qa_type
                 r.run_at = run_at
             new_keys = {(r.namespace, r.ci_name, qa_type) for r in new_results}
+
+            def _qa_row_key(row) -> tuple[str, str, str]:
+                # Defensive: durable reload normally rehydrates to QAResultItem,
+                # but bare dicts must not crash merge on r.namespace.
+                if isinstance(row, dict):
+                    return (
+                        str(row.get("namespace") or ""),
+                        str(row.get("ci_name") or ""),
+                        str(row.get("qa_type") or ""),
+                    )
+                return (
+                    str(getattr(row, "namespace", "") or ""),
+                    str(getattr(row, "ci_name", "") or ""),
+                    str(getattr(row, "qa_type", "") or ""),
+                )
+
             with _state_lock:
-                kept = [
-                    r for r in ws.qa_results
-                    if (r.namespace, r.ci_name, getattr(r, "qa_type", "")) not in new_keys
-                ]
+                prior = [wstore._de_qa(r) for r in (ws.qa_results or [])]
+                kept = [r for r in prior if _qa_row_key(r) not in new_keys]
                 all_results = kept + new_results
                 ws.qa_results = all_results
                 ws.qa_log_path = log_path
