@@ -149,6 +149,31 @@ def schedule_session_start(schedule) -> str | None:
     return normalize_session_start(getattr(schedule, "session_start", None) or "")
 
 
+def _slot_hhmm_from_event_namespace(namespace: str | None) -> str | None:
+    """Parse HHMM from ``event-{id}-{DDMMYYYY}-{HHMM}`` namespaces."""
+    ns = str(namespace or "").strip()
+    if not ns.startswith("event-"):
+        return None
+    slot = ns.rsplit("-", 1)[-1]
+    if len(slot) == 4 and slot.isdigit():
+        return slot
+    return None
+
+
+def _hhmm_as_datetime(hhmm: str | None) -> datetime | None:
+    """Build a naive datetime whose clock equals HHMM (date unused)."""
+    raw = normalize_session_start(hhmm)
+    if not raw or len(raw) < 4 or not raw[:4].isdigit():
+        return None
+    try:
+        hour, minute = int(raw[:2]), int(raw[2:4])
+        if hour > 23 or minute > 59:
+            return None
+        return datetime(2000, 1, 1, hour, minute)
+    except ValueError:
+        return None
+
+
 def schedule_matches_scope(
     schedule,
     *,
@@ -335,15 +360,20 @@ def build_qa_coverage(
         if ns_filter is not None and ns not in ns_filter:
             continue
         dt = parse_provisioning_dt(getattr(s, "provisioning_date", None))
+        # Prefer HHMM embedded in event-* namespace (floor slot), then CSV
+        # session_start, then provisioning clock. Provisioning is often UTC
+        # evening and was greying Labagator morning/midday floor sessions.
+        ss = _slot_hhmm_from_event_namespace(ns) or schedule_session_start(s)
+        band_dt = _hhmm_as_datetime(ss) or dt
         covered.append(
             {
                 "ci": getattr(s, "ci", None),
                 "ci_name": getattr(s, "ci_name", None),
                 "namespace": ns,
                 "session_date": schedule_floor_date(s),
-                "session_start": schedule_session_start(s),
+                "session_start": ss,
                 "event_id": schedule_event_id(s),
-                "time_band": time_band_key(dt) if dt else None,
+                "time_band": time_band_key(band_dt) if band_dt else None,
             }
         )
 

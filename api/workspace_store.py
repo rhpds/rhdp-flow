@@ -149,14 +149,14 @@ def _de_qa(item: Any) -> Any:
     # QA2 multi-workshop rows store "assigned/total" strings; model allows str|int.
     try:
         return QAResultItem.model_validate(data)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Drop keys that still fail validation rather than returning a bare dict
         # (bare dicts break merge code that uses r.namespace).
         fields = getattr(QAResultItem, "model_fields", {}) or {}
         filtered = {k: v for k, v in data.items() if k in fields}
         try:
             return QAResultItem.model_validate(filtered)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return QAResultItem(
                 ci_name=str(data.get("ci_name") or ""),
                 ci=str(data.get("ci") or ""),
