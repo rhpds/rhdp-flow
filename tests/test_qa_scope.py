@@ -126,6 +126,22 @@ def test_coverage_full_event_lists_every_row():
     assert bands == {"AM": "morning", "PM": "afternoon"}
 
 
+def test_coverage_band_prefers_event_namespace_slot_over_provisioning():
+    """event-* HHMM slot must win over UTC provisioning (avoids greying floor pills)."""
+    rows = [
+        _row(
+            ci_name="Slot",
+            namespace="event-42-24112026-1000",
+            provisioning_date="24/11/2026 23:00",
+            session_date="2026-11-24",
+            session_start="2300",  # bad/UTC — namespace slot is authoritative
+        ),
+    ]
+    cov = build_qa_coverage(rows, floor="event")
+    assert cov["covered"][0]["session_start"] == "1000"
+    assert cov["covered"][0]["time_band"] == "morning"
+
+
 def test_coverage_floor_day_morning_only_excludes_afternoon():
     """The drift root cause: a morning-band run must report only morning rows."""
     rows = [

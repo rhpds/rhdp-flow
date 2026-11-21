@@ -3751,6 +3751,9 @@ async def qa_run(request: Request, body: QARequest = QARequest(), _key=Depends(v
                 event_id=event_id,
                 session_start=session_start,
             )
+            # Labagator applies the coverage gate only to this stage so a QA2
+            # run cannot grey out prior QA1 greens (and vice versa).
+            coverage["qa_type"] = qa_type
             # Stamp this run's stage + time so results from different QA stages
             # (or different events/namespaces) can coexist instead of clobbering
             # each other. A row is only replaced by a newer row with the same
