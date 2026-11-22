@@ -97,6 +97,8 @@ from api.services.qa_scope import (
     build_qa_scopes,
     filter_schedules_by_scope,
     merge_qa_coverage,
+    is_selfpaced_event_namespace,
+    parse_event_namespace_local_slot,
 )
 from lib.deploy_pace import deploy_concurrency, deploy_pace_seconds
 from rhdp_flow import (
@@ -1453,8 +1455,10 @@ def _session_block_display_name(
     session_start: str | None,
     ns: str,
 ) -> str:
-    """Dropdown label: ``<Event name> — <DD/MM/YYYY> <HH:MM>``."""
+    """Dropdown label: ``<Event name> — <DD/MM/YYYY> <HH:MM>`` (or Self-paced)."""
     name = (event_name or "").strip() or "Labagator event"
+    if is_selfpaced_event_namespace(ns):
+        return f"{name} — Self-paced"
     day = _format_session_date_display(session_date)
     start = _format_session_start_display(session_start)
     if day and start:
@@ -1467,7 +1471,12 @@ def _session_block_display_name(
 
 
 def _ns_meta_from_schedules(ns: str, schedules: list[WorkshopSchedule] | None = None) -> tuple[str, str, str]:
-    """Pick event_name / session_date / session_start for a namespace from loaded schedules."""
+    """Pick event_name / session_date / session_start for a namespace from loaded schedules.
+
+    Date/start prefer the event-local slot encoded in ``event-{id}-{DDMMYYYY}-{HHMM}``.
+    CSV ``Session_Start`` is UTC (for Workshop labels) and must not drive the
+    OpenShift project display-name — operators expect local-to-event wall clock.
+    """
     event_name = ""
     session_date = ""
     session_start = ""
@@ -1482,6 +1491,11 @@ def _ns_meta_from_schedules(ns: str, schedules: list[WorkshopSchedule] | None = 
             session_start = str(getattr(s, "session_start", "") or "").strip()
         if event_name and session_date and session_start:
             break
+    local_date, local_hhmm = parse_event_namespace_local_slot(ns)
+    if local_date:
+        session_date = local_date
+    if local_hhmm:
+        session_start = f"{local_hhmm[:2]}:{local_hhmm[2:]}"
     return event_name, session_date, session_start
 
 
@@ -1549,7 +1563,8 @@ def _create_namespace(
 
     shown = (display_name or "").strip() or f"Labagator session block {ns}"
     shown_q = _yaml_double_quoted(shown)
-    desc_q = _yaml_double_quoted(f"Flow-created session-block project {ns}")
+    kind = "self-paced" if is_selfpaced_event_namespace(ns) else "session-block"
+    desc_q = _yaml_double_quoted(f"Flow-created {kind} project {ns}")
     manifest = (
         "apiVersion: project.openshift.io/v1\n"
         "kind: ProjectRequest\n"

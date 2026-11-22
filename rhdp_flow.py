@@ -502,6 +502,15 @@ def analyze_cluster_tenant_relationships(schedules: list[WorkshopSchedule], conf
                 schedule.detection_method = "csv_label"
                 logger.debug(f"{schedule.ci_name}: Detected as workshop (CSV label)")
                 continue
+            elif item_type_lower.replace("_", "").replace("-", "") in {
+                "selfpacedlab",
+                "selfpaced",
+                "spl",
+            }:
+                # SelfPacedLab path — not cluster/tenant/workshop WorkshopProvision
+                schedule.detection_method = "csv_label"
+                logger.debug(f"{schedule.ci_name}: Detected as selfpacedlab (CSV label)")
+                continue
 
         # Priority 2: Naming convention fallback
         if is_cluster_ci(schedule.ci):
@@ -4922,9 +4931,15 @@ def qa2_verify_setup(
     logger.info(f"Found {len(resourceclaims)} scheduled ResourceClaim(s) in namespace {namespace}")
     
     results = []
-    
+
+    from lib.selfpacedlab_deploy import is_selfpaced_schedule, qa_selfpaced_setup_result
+
     # Check each scheduled item from CSV
     for schedule in scheduled_items:
+        if is_selfpaced_schedule(schedule):
+            results.append(qa_selfpaced_setup_result(schedule, namespace, config))
+            continue
+
         # For multi-asset workshops, check MultiWorkshop resources
         if schedule.is_multi_asset:
             try:
@@ -5327,9 +5342,15 @@ def qa3_verify_deployment_status(
     logger.info(f"Found {len(resourceclaims)} scheduled ResourceClaim(s) in namespace {namespace}")
     
     results = []
-    
+
+    from lib.selfpacedlab_deploy import is_selfpaced_schedule, qa_selfpaced_health_result
+
     # Check each scheduled item from CSV
     for schedule in scheduled_items:
+        if is_selfpaced_schedule(schedule):
+            results.append(qa_selfpaced_health_result(schedule, namespace, config))
+            continue
+
         # For multi-asset workshops, check MultiWorkshop resources
         if schedule.is_multi_asset:
             try:
@@ -5687,6 +5708,12 @@ def _enrich_qa2_results_with_soundcheck(
     if not results:
         return summary
 
+    # SelfPacedLab rows use poolCount health, not workshop Soundcheck tabs.
+    for r in results:
+        if r.get("skip_soundcheck") or r.get("item_type") == "selfpacedlab":
+            r.setdefault("showroom_status", "skipped_selfpacedlab")
+            r.setdefault("showroom_url", "")
+
     if isinstance(namespaces, str):
         namespaces = [namespaces]
 
@@ -5703,14 +5730,17 @@ def _enrich_qa2_results_with_soundcheck(
 
     # Collect (schedule, workshop_name, workshop_id) across ALL namespaces so a
     # single kickoff covers the whole run.
+    from lib.selfpacedlab_deploy import is_selfpaced_schedule
+
+    workshop_items = [s for s in scheduled_items if not is_selfpaced_schedule(s)]
     sched_by_ns: dict[str, list] = {}
-    for s in scheduled_items:
+    for s in workshop_items:
         sched_by_ns.setdefault(getattr(s, "namespace", "") or "", []).append(s)
     pairs: list[tuple[object, str, str]] = []
     for ns in namespaces:
         # scheduled_items usually carry .namespace; if a caller passes items
         # without it, probe the namespace with the full set rather than skip.
-        items = sched_by_ns.get(ns) if ns in sched_by_ns else scheduled_items
+        items = sched_by_ns.get(ns) if ns in sched_by_ns else workshop_items
         pairs.extend(_collect_workshop_ids_for_schedules(items, ns, config))
 
     if not pairs:
@@ -6676,6 +6706,48 @@ def process_schedule(
                 )
 
     try:
+        # SelfPacedLab path — week-long pool; scale/flush via poolSize (not WorkshopProvision).
+        from lib.selfpacedlab_deploy import is_selfpaced_schedule, upsert_selfpacedlab_and_provision
+
+        if is_selfpaced_schedule(schedule):
+            logger.info(
+                f"SelfPacedLab detected for {schedule.ci_name} — upsert SelfPacedLab + ProvisionItem"
+            )
+            spl_name, detail = upsert_selfpacedlab_and_provision(schedule, config)
+            if not spl_name:
+                return DeploymentResult(
+                    ci_name=schedule.ci_name,
+                    ci=schedule.ci,
+                    namespace=schedule.namespace,
+                    guid="failed",
+                    url="",
+                    status="failed",
+                    provisioning_date=schedule.provisioning_date,
+                    auto_stop=schedule.auto_stop,
+                    auto_destroy=schedule.auto_destroy,
+                    timestamp=utc_timestamp_str(),
+                    error_message=detail or "SelfPacedLab upsert failed",
+                    password=schedule.password,
+                    users=schedule.users,
+                    instances=schedule.instances,
+                )
+            _bd = getattr(config, "base_domain", "integration.demo.redhat.com")
+            return DeploymentResult(
+                ci_name=schedule.ci_name,
+                ci=schedule.ci,
+                namespace=schedule.namespace,
+                guid=spl_name,
+                url=f"https://{_bd}/selfpacedlabs/{schedule.namespace}/{spl_name}",
+                status="deployed_unverified",
+                provisioning_date=schedule.provisioning_date,
+                auto_stop=schedule.auto_stop,
+                auto_destroy=schedule.auto_destroy,
+                timestamp=utc_timestamp_str(),
+                password=schedule.password,
+                users=schedule.users,
+                instances=schedule.instances,
+            )
+
         # Check if this is a multi-asset workshop
         if schedule.is_multi_asset:
             logger.info(f"Multi-asset workshop detected - creating MultiWorkshop with assets: {schedule.asset_cis}")
@@ -7778,7 +7850,15 @@ def scale_workshops(schedules, config, target_count):
     """Scale workshop provisions to the given target count.
 
     Finds WorkshopProvision resources and patches their spec.count.
+    SelfPacedLab rows patch SelfPacedLabProvisionItem.spec.poolSize instead.
     """
+    from lib.selfpacedlab_deploy import is_selfpaced_schedule, scale_selfpaced_labs
+
+    sp_rows = [s for s in schedules if is_selfpaced_schedule(s)]
+    if sp_rows:
+        scale_selfpaced_labs(sp_rows, config, target_count)
+    schedules = [s for s in schedules if not is_selfpaced_schedule(s)]
+
     env = os.environ.copy()
     if config.kubeconfig_path:
         env['KUBECONFIG'] = config.kubeconfig_path

@@ -158,8 +158,32 @@ def test_session_block_display_name_format():
         == "Summit — 18/11/2026 09:00"
     )
     assert (
+        routes._session_block_display_name("Summit", None, None, "event-42-sp")
+        == "Summit — Self-paced"
+    )
+    assert (
         routes._session_block_display_name("", None, None, "event-42-24112026-1000")
         == "Labagator event (event-42-24112026-1000)"
+    )
+
+
+def test_ns_meta_prefers_event_local_namespace_slot_over_utc_session_start():
+    """Display-name must use local HHMM from the ns, not CSV Session_Start (UTC)."""
+    schedules = [
+        _make_schedule(
+            namespace="event-42-24112026-1000",
+            event_name="Red Hat One 2027 Testing",
+            session_date="2026-11-24",
+            session_start="18:00",  # UTC — must not appear in the label
+        )
+    ]
+    name, day, start = routes._ns_meta_from_schedules("event-42-24112026-1000", schedules)
+    assert name == "Red Hat One 2027 Testing"
+    assert day == "2026-11-24"
+    assert start == "10:00"
+    assert (
+        routes._session_block_display_name(name, day, start, "event-42-24112026-1000")
+        == "Red Hat One 2027 Testing — 24/11/2026 10:00"
     )
 
 

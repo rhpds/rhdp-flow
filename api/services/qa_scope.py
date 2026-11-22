@@ -7,9 +7,16 @@ falls back to the calendar day of ``Provisioning Date`` when unset.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
+
+# event-{id}-{DDMMYYYY}-{HHMM} — HHMM/date are event-local session wall clock.
+# Workshop session block: event-42-24112026-1000
+# Self-paced week project: event-42-sp (no local slot)
+_EVENT_NS_SLOT_RE = re.compile(r"^event-\d+-(?:sp-)?(\d{8})-(\d{4})$")
+_EVENT_SP_NS_RE = re.compile(r"^event-\d+-sp$")
 
 # Labagator landing_export / ops_signals bands (event-local / CSV clock time).
 TIME_BANDS: tuple[tuple[str, str, int, int], ...] = (
@@ -149,15 +156,43 @@ def schedule_session_start(schedule) -> str | None:
     return normalize_session_start(getattr(schedule, "session_start", None) or "")
 
 
+def is_selfpaced_event_namespace(namespace: str | None) -> bool:
+    """True for Labagator self-paced projects (``event-{id}-sp``)."""
+    ns = str(namespace or "").strip()
+    return bool(_EVENT_SP_NS_RE.fullmatch(ns))
+
+
+def parse_event_namespace_local_slot(namespace: str | None) -> tuple[str | None, str | None]:
+    """Parse ``(YYYY-MM-DD, HHMM)`` event-local slot from an ``event-*`` namespace.
+
+    Labagator encodes the Ops floor day + local session start in the project name
+    (``event-42-24112026-1000`` → 2026-11-24 @ 10:00 local). CSV ``Session_Start``
+    is UTC and must not be used for operator-facing labels.
+
+    Self-paced week projects (``event-42-sp``) have no local slot.
+    """
+    ns = str(namespace or "").strip()
+    if is_selfpaced_event_namespace(ns):
+        return None, None
+    match = _EVENT_NS_SLOT_RE.fullmatch(ns)
+    if not match:
+        return None, None
+    ddmmyyyy, hhmm = match.group(1), match.group(2)
+    day_s, month_s, year_s = ddmmyyyy[:2], ddmmyyyy[2:4], ddmmyyyy[4:]
+    try:
+        day, month, year = int(day_s), int(month_s), int(year_s)
+        hour, minute = int(hhmm[:2]), int(hhmm[2:])
+    except ValueError:
+        return None, None
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
+        return None, None
+    return f"{year:04d}-{month:02d}-{day:02d}", hhmm
+
+
 def _slot_hhmm_from_event_namespace(namespace: str | None) -> str | None:
     """Parse HHMM from ``event-{id}-{DDMMYYYY}-{HHMM}`` namespaces."""
-    ns = str(namespace or "").strip()
-    if not ns.startswith("event-"):
-        return None
-    slot = ns.rsplit("-", 1)[-1]
-    if len(slot) == 4 and slot.isdigit():
-        return slot
-    return None
+    _, hhmm = parse_event_namespace_local_slot(namespace)
+    return hhmm
 
 
 def _hhmm_as_datetime(hhmm: str | None) -> datetime | None:

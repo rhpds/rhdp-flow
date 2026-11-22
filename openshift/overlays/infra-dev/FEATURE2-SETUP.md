@@ -54,8 +54,10 @@ Current targets:
 
 Replicate the `rhdp-scheduler` ClusterRole (see `openshift/base/clusterrole.yaml`)
 on the target — it **must** include `multiworkshops` (multi-asset / Asset_CIs
-deploys fail with Forbidden without it). Then bind whichever SA the target
-kubeconfig uses (`rhdp-flow-deployer` on Events today, or `rhdp-scheduler`):
+deploys fail with Forbidden without it) and `selfpacedlabs` /
+`selfpacedlabprovisionitems` (self-paced pool scale/flush). Then bind whichever
+SA the target kubeconfig uses (`rhdp-flow-deployer` on Events today, or
+`rhdp-scheduler`):
 
 ```sh
 # --- run against each TARGET cluster ---

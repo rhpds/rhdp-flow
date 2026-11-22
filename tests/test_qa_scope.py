@@ -8,6 +8,7 @@ from api.services.qa_scope import (
     filter_schedules_by_scope,
     format_day_label,
     merge_qa_coverage,
+    parse_event_namespace_local_slot,
     schedule_floor_date,
 )
 
@@ -24,6 +25,14 @@ def _row(**kwargs):
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
+
+
+def test_parse_event_namespace_local_slot():
+    assert parse_event_namespace_local_slot("event-42-24112026-1000") == ("2026-11-24", "1000")
+    assert parse_event_namespace_local_slot("event-42-24112026-0030") == ("2026-11-24", "0030")
+    assert parse_event_namespace_local_slot("user-klewis-redhat-com") == (None, None)
+    assert parse_event_namespace_local_slot("event-42") == (None, None)
+    assert parse_event_namespace_local_slot("event-42-sp") == (None, None)
 
 
 def test_session_date_preferred_over_provisioning_day():
