@@ -786,6 +786,23 @@ class QAResultItem(BaseModel):
 
     model_config = {"extra": "allow"}
 
+    @field_validator("total_seats", "expected_users", "actual_count", mode="before")
+    @classmethod
+    def _empty_str_to_none_int(cls, v):
+        """SelfPacedLab QA historically emitted \"\" for unknown seat counts."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(v)
+        try:
+            return int(str(v).strip())
+        except ValueError:
+            return None
+
 
 class OperatorOverride(BaseModel):
     """Local Flow tweak an operator accepted (not Labagator master)."""

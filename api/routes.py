@@ -411,6 +411,9 @@ def _normalize_qa_result_dict(r: dict) -> dict:
         if not found:
             out["actual_count"] = None
 
+    # --- total_seats: SelfPacedLab QA used "" when pool unknown; QAResultItem wants int|None ---
+    out["total_seats"] = _coerce_optional_int(out.get("total_seats"))
+
     # --- deployed: derive from provisioned if missing ---
     if not out.get("deployed") and out.get("provisioned") is not None:
         out["deployed"] = "Yes" if out.get("provisioned") else "No"
