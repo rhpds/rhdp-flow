@@ -92,6 +92,7 @@ def test_ensure_namespaces_creates_missing_via_projectrequest(client):
             cfg = RHDPConfig()
             cfg.oc_command = "oc"
             cfg.kubeconfig_path = None
+            cfg.default_requester_email = "ops@redhat.com"
             mock_cfg.return_value = cfg
             resp = client.post(
                 "/api/schedules/ensure-namespaces",
@@ -115,6 +116,12 @@ def test_ensure_namespaces_creates_missing_via_projectrequest(client):
         and any("openshift.io/display-name=Summit Test — 17/11/2026 09:00" in x for x in c)
         for c in calls
     )
+    assert any(
+        c[:3] == ["oc", "annotate", "namespace"]
+        and any("openshift.io/requester=ops@redhat.com" in x for x in c)
+        for c in calls
+    )
+    assert any(c[:4] == ["oc", "get", "rolebinding", "admin"] for c in calls)
 
 
 def test_ensure_namespaces_does_not_create_user_namespaces(client):
@@ -150,6 +157,49 @@ def test_ensure_namespaces_does_not_create_user_namespaces(client):
     assert body["created"] == []
     assert body["missing"] == ["user-klewis-redhat-com"]
     assert not any(c[:2] == ["oc", "create"] for c in calls)
+
+
+def test_parse_sa_user_subject():
+    assert routes._parse_sa_user_subject(
+        "system:serviceaccount:rhdp-flow:rhdp-flow-deployer"
+    ) == ("rhdp-flow", "rhdp-flow-deployer")
+    assert routes._parse_sa_user_subject("prutledg@redhat.com") is None
+    assert routes._parse_sa_user_subject("system:serviceaccount:only-ns") is None
+
+
+def test_stamp_event_namespace_repairs_sa_as_user_admin_binding():
+    from rhdp_flow import RHDPConfig
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if list(cmd)[:4] == ["oc", "get", "rolebinding", "admin"]:
+            return MagicMock(
+                returncode=0,
+                stdout=(
+                    '{"subjects":[{"apiGroup":"rbac.authorization.k8s.io",'
+                    '"kind":"User",'
+                    '"name":"system:serviceaccount:rhdp-flow:rhdp-flow-deployer"}]}'
+                ),
+                stderr="",
+            )
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    cfg = RHDPConfig()
+    cfg.oc_command = "oc"
+    cfg.default_requester_email = "ops@redhat.com"
+    with patch("api.routes.subprocess.run", side_effect=fake_run):
+        routes._stamp_event_namespace(
+            "event-42-sp",
+            cfg,
+            {},
+            display_name="RH1 — Self-paced",
+        )
+
+    patch_calls = [c for c in calls if c[:3] == ["oc", "patch", "rolebinding"]]
+    assert patch_calls, calls
+    assert any("ServiceAccount" in (c[-1] if c else "") for c in patch_calls)
 
 
 def test_session_block_display_name_format():

@@ -1403,6 +1403,8 @@ def _namespace_exists(ns: str, config: RHDPConfig, env: dict[str, str]) -> bool:
 EVENT_USER_UID_LABEL = "usernamespace.gpte.redhat.com/user-uid"
 EVENT_USER_UID_VALUE = "EVENT"
 OPENSHIFT_DISPLAY_NAME_ANN = "openshift.io/display-name"
+OPENSHIFT_REQUESTER_ANN = "openshift.io/requester"
+_SA_USER_PREFIX = "system:serviceaccount:"
 
 
 def _yaml_double_quoted(value: str) -> str:
@@ -1502,6 +1504,90 @@ def _ns_meta_from_schedules(ns: str, schedules: list[WorkshopSchedule] | None = 
     return event_name, session_date, session_start
 
 
+def _parse_sa_user_subject(name: str) -> tuple[str, str] | None:
+    """Parse ``system:serviceaccount:ns:name`` → ``(ns, name)``."""
+    raw = (name or "").strip()
+    if not raw.startswith(_SA_USER_PREFIX):
+        return None
+    rest = raw[len(_SA_USER_PREFIX) :]
+    if ":" not in rest:
+        return None
+    sa_ns, sa_name = rest.split(":", 1)
+    if not sa_ns or not sa_name or ":" in sa_name:
+        return None
+    return sa_ns, sa_name
+
+
+def _repair_admin_rolebinding_sa_user(ns: str, config: RHDPConfig, env: dict[str, str]) -> None:
+    """Rewrite ProjectRequest admin binding that mistypes an SA as kind=User.
+
+    OpenShift stamps ``subjects: [{kind: User, name: system:serviceaccount:…}]``
+    when a service account creates the ProjectRequest. Poolboy then tries to
+    create an OpenShift User with that name (colons → 422) and every seat sits
+    in Waiting to Provision. Prefer a real ServiceAccount subject.
+    """
+    try:
+        r = subprocess.run(
+            [config.oc_command, "get", "rolebinding", "admin", "-n", ns, "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except Exception as exc:
+        logger.warning("Failed to read admin RoleBinding in %s: %s", ns, exc)
+        return
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return
+    try:
+        import json
+
+        binding = json.loads(r.stdout)
+    except Exception as exc:
+        logger.warning("Invalid admin RoleBinding JSON in %s: %s", ns, exc)
+        return
+    subjects = list(binding.get("subjects") or [])
+    changed = False
+    fixed: list[dict[str, str]] = []
+    for sub in subjects:
+        if not isinstance(sub, dict):
+            continue
+        kind = str(sub.get("kind") or "")
+        name = str(sub.get("name") or "")
+        parsed = _parse_sa_user_subject(name) if kind == "User" else None
+        if parsed is None:
+            fixed.append(sub)
+            continue
+        sa_ns, sa_name = parsed
+        fixed.append({"kind": "ServiceAccount", "name": sa_name, "namespace": sa_ns})
+        changed = True
+    if not changed:
+        return
+    patch = [{"op": "replace", "path": "/subjects", "value": fixed}]
+    try:
+        import json
+
+        subprocess.run(
+            [
+                config.oc_command,
+                "patch",
+                "rolebinding",
+                "admin",
+                "-n",
+                ns,
+                "--type=json",
+                "-p",
+                json.dumps(patch),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except Exception as exc:
+        logger.warning("Failed to repair admin RoleBinding in %s: %s", ns, exc)
+
+
 def _stamp_event_namespace(
     ns: str,
     config: RHDPConfig,
@@ -1509,7 +1595,14 @@ def _stamp_event_namespace(
     *,
     display_name: str,
 ) -> None:
-    """Best-effort user-uid=EVENT label + openshift.io/display-name annotation."""
+    """Stamp EVENT user-uid, display-name, and a real-user openshift.io/requester.
+
+    ProjectRequest created by the Flow SA leaves
+    ``openshift.io/requester=system:serviceaccount:…``. Poolboy tries to ensure
+    an OpenShift User for that value and hard-fails (422) — seats never leave
+    Waiting to Provision. Overwrite with the operator / default requester email
+    whenever we have one, and repair the admin RoleBinding SA-as-User footgun.
+    """
     try:
         subprocess.run(
             [
@@ -1544,6 +1637,36 @@ def _stamp_event_namespace(
         )
     except Exception as exc:
         logger.warning("Failed to annotate display-name on %s: %s", ns, exc)
+
+    requester = (getattr(config, "default_requester_email", "") or "").strip()
+    if requester and "@" in requester and not requester.startswith(_SA_USER_PREFIX):
+        try:
+            subprocess.run(
+                [
+                    config.oc_command,
+                    "annotate",
+                    "namespace",
+                    ns,
+                    f"{OPENSHIFT_REQUESTER_ANN}={requester}",
+                    "--overwrite",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+        except Exception as exc:
+            logger.warning("Failed to annotate requester on %s: %s", ns, exc)
+    else:
+        logger.warning(
+            "No operator/default requester email to stamp on %s — "
+            "openshift.io/requester may remain a serviceaccount and Poolboy "
+            "will fail seat provision (set RHDP_DEFAULT_REQUESTER_EMAIL or "
+            "authenticate the Flow call with an operator email)",
+            ns,
+        )
+
+    _repair_admin_rolebinding_sa_user(ns, config, env)
 
 
 def _create_namespace(

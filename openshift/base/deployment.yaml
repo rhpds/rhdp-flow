@@ -50,6 +50,11 @@ spec:
               value: "/app/data"
             # Prefer RHDP_DATABASE_URL / RHDP_FERNET_KEY from rhdp-flow-api secret
             # (Postgres). When unset, api/db.py falls back to local SQLite.
+            # ProjectRequest-as-SA leaves openshift.io/requester=system:serviceaccount:…
+            # which Poolboy cannot turn into a User (422 → seats stuck Waiting).
+            # Stamp a real OpenShift User email on every event-* project create.
+            - name: RHDP_DEFAULT_REQUESTER_EMAIL
+              value: "prutledg@redhat.com"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
