@@ -16,20 +16,23 @@ rules:
   - apiGroups: ["project.openshift.io"]
     resources: ["projects"]
     verbs: ["get", "list", "delete"]
-  # Manage Babylon workshop + self-paced lab resources (deploy creates, scale/flush, cleanup).
+  # Manage Babylon workshop resources (deploy creates, scale, cleanup).
   # multiworkshops required for multi-asset / Asset_CIs rows (Roadshow, LB1577, etc.).
-  # selfpacedlabs / selfpacedlabprovisionitems: week-long SP pools (scale poolSize, flush).
   - apiGroups: ["babylon.gpte.redhat.com"]
     resources:
       - workshops
       - workshopprovisions
       - resourceclaims
       - multiworkshops
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Read-only SelfPacedLab for QA (Labagator owns create/scale/flush).
+  - apiGroups: ["babylon.gpte.redhat.com"]
+    resources:
       - selfpacedlabs
       - selfpacedlabs/status
       - selfpacedlabprovisionitems
       - selfpacedlabprovisionitems/status
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
+    verbs: ["get", "list"]
   # Read catalog items for num_users validation
   - apiGroups: ["babylon.gpte.redhat.com"]
     resources: ["catalogitems"]

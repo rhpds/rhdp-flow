@@ -1,12 +1,9 @@
-"""Unit tests for SelfPacedLab deploy helpers."""
+"""Unit tests for SelfPacedLab QA helpers (Flow does not deploy SP)."""
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from lib.selfpacedlab_deploy import (
-    build_provision_item_dict,
-    build_selfpacedlab_dict,
     desired_pool_action,
     is_selfpaced_schedule,
     stable_selfpacedlab_name,
@@ -70,27 +67,3 @@ def test_desired_pool_defer_before_provision():
     size, action = desired_pool_action(_sched(), now=now)
     assert action == "defer"
     assert size is None
-
-
-def test_build_spl_and_provision_dicts():
-    with patch("lib.selfpacedlab_deploy.catalog_namespace_for", return_value="babylon-catalog-event"):
-        spl = build_selfpacedlab_dict(
-            _sched(auto_destroy="26/11/2026 13:30"),
-            config=SimpleNamespace(),
-            name="spl-42-lb1063",
-            lifespan_start="2026-11-24T01:00:00Z",
-            lifespan_end="2026-11-26T13:30:00Z",
-        )
-        assert spl["kind"] == "SelfPacedLab"
-        assert spl["spec"]["lifespan"]["end"] == "2026-11-26T13:30:00Z"
-        assert spl["metadata"]["labels"]["labagator.redhat.com/event-id"] == "42"
-        spi = build_provision_item_dict(
-            _sched(),
-            config=SimpleNamespace(),
-            name="spl-42-lb1063",
-            spl_uid="uid-1",
-            pool_size=5,
-        )
-        assert spi["kind"] == "SelfPacedLabProvisionItem"
-        assert spi["spec"]["poolSize"] == 5
-        assert spi["spec"]["catalogItem"]["name"] == "summit.lb1063.event"

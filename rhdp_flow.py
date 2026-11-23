@@ -6706,43 +6706,28 @@ def process_schedule(
                 )
 
     try:
-        # SelfPacedLab path — week-long pool; scale/flush via poolSize (not WorkshopProvision).
-        from lib.selfpacedlab_deploy import is_selfpaced_schedule, upsert_selfpacedlab_and_provision
+        # SelfPacedLab rows are managed by Labagator (runtime + Ops). Flow skips deploy.
+        from lib.selfpacedlab_deploy import is_selfpaced_schedule, stable_selfpacedlab_name
 
         if is_selfpaced_schedule(schedule):
+            spl_name = stable_selfpacedlab_name(schedule)
             logger.info(
-                f"SelfPacedLab detected for {schedule.ci_name} — upsert SelfPacedLab + ProvisionItem"
+                "SelfPacedLab %s (%s) — skipping Flow deploy; Labagator owns SP pools",
+                schedule.ci_name,
+                spl_name,
             )
-            spl_name, detail = upsert_selfpacedlab_and_provision(schedule, config)
-            if not spl_name:
-                return DeploymentResult(
-                    ci_name=schedule.ci_name,
-                    ci=schedule.ci,
-                    namespace=schedule.namespace,
-                    guid="failed",
-                    url="",
-                    status="failed",
-                    provisioning_date=schedule.provisioning_date,
-                    auto_stop=schedule.auto_stop,
-                    auto_destroy=schedule.auto_destroy,
-                    timestamp=utc_timestamp_str(),
-                    error_message=detail or "SelfPacedLab upsert failed",
-                    password=schedule.password,
-                    users=schedule.users,
-                    instances=schedule.instances,
-                )
-            _bd = getattr(config, "base_domain", "integration.demo.redhat.com")
             return DeploymentResult(
                 ci_name=schedule.ci_name,
                 ci=schedule.ci,
                 namespace=schedule.namespace,
                 guid=spl_name,
-                url=f"https://{_bd}/selfpacedlabs/{schedule.namespace}/{spl_name}",
-                status="deployed_unverified",
+                url="",
+                status="skipped",
                 provisioning_date=schedule.provisioning_date,
                 auto_stop=schedule.auto_stop,
                 auto_destroy=schedule.auto_destroy,
                 timestamp=utc_timestamp_str(),
+                error_message="SelfPacedLab managed by Labagator",
                 password=schedule.password,
                 users=schedule.users,
                 instances=schedule.instances,
@@ -7850,13 +7835,16 @@ def scale_workshops(schedules, config, target_count):
     """Scale workshop provisions to the given target count.
 
     Finds WorkshopProvision resources and patches their spec.count.
-    SelfPacedLab rows patch SelfPacedLabProvisionItem.spec.poolSize instead.
+    SelfPacedLab rows are skipped — Labagator owns SP poolSize.
     """
-    from lib.selfpacedlab_deploy import is_selfpaced_schedule, scale_selfpaced_labs
+    from lib.selfpacedlab_deploy import is_selfpaced_schedule
 
     sp_rows = [s for s in schedules if is_selfpaced_schedule(s)]
     if sp_rows:
-        scale_selfpaced_labs(sp_rows, config, target_count)
+        logger.info(
+            "Skipping scale for %s SelfPacedLab row(s); Labagator owns SP pools",
+            len(sp_rows),
+        )
     schedules = [s for s in schedules if not is_selfpaced_schedule(s)]
 
     env = os.environ.copy()
