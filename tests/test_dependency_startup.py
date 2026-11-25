@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,14 @@ from fastapi import FastAPI
 
 from api import dependency_routes, dependency_runtime
 from lib.dependency_store import DependencyStore
-from tests.test_dependency_runtime import Adapter, plan, start  # noqa: F401
+from tests.test_dependency_runtime import Adapter, make_plan, start
 
-# ruff: noqa: F811 -- pytest fixture imports
+
+@pytest.fixture
+def plan():
+    # The runtime reconciles against the wall clock, so the shared fixture's fixed
+    # NOW falls outside the deployment window once real time passes it.
+    return make_plan(datetime.now(UTC))
 
 
 def test_startup_requires_explicit_single_instance(monkeypatch):

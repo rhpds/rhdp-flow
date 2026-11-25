@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from api import cluster_targets, identity, routes
 from api.server import app
+from api.workspace_store import ws
 
 DEFAULT = identity.DEFAULT_TARGET_CLUSTER
 
@@ -94,7 +95,7 @@ def test_is_configured_caches(monkeypatch):
 
 def test_request_config_routes_default_to_events(default_configured, recorded_config, monkeypatch, make_tenant_schedule):
     """validate/catalog/pool endpoints use _request_config; no target -> Events."""
-    monkeypatch.setattr(routes, "_schedules", [make_tenant_schedule()])
+    ws.schedules = [make_tenant_schedule()]
     r = _client().post("/api/schedules/validate-namespaces", json={})
     assert r.status_code == 200
     assert recorded_config == [DEFAULT]
@@ -117,7 +118,7 @@ def test_request_config_without_default_never_deletes_user_kubeconfig(monkeypatc
 def test_dry_run_defaults_to_events(default_configured, recorded_config, monkeypatch, make_tenant_schedule):
     s = make_tenant_schedule()
     s.multi_workshop_name = None
-    monkeypatch.setattr(routes, "_schedules", [s])
+    ws.schedules = [s]
     monkeypatch.setattr(routes, "process_schedule", lambda sched, config, **kw: routes.DeploymentResult(
         ci_name=sched.ci_name, ci=sched.ci, namespace=sched.namespace, guid="g", url="u",
         status="dry_run", provisioning_date="", auto_stop="", auto_destroy="", timestamp="",

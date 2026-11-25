@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from api import routes
 from api.server import app
+from api.workspace_store import ws
 from lib.tenant_cluster_capacity import check_tenant_cluster_references
 from scripts.check_babylon_contract import check
 
@@ -29,7 +30,7 @@ def headers(target):
 
 
 def test_concurrent_targets_use_separate_credentials_and_cleanup(monkeypatch, tmp_path, make_tenant_schedule):
-    monkeypatch.setattr(routes, "_schedules", [make_tenant_schedule()])
+    ws.schedules = [make_tenant_schedule()]
     barrier = threading.Barrier(2)
     paths = []
 
@@ -140,7 +141,7 @@ def test_slow_deploy_preflight_keeps_probe_responsive(monkeypatch, make_tenant_s
     tenant = make_tenant_schedule()
     tenant.is_tenant = False
     tenant.users = 1
-    monkeypatch.setattr(routes, "_schedules", [tenant])
+    ws.schedules = [tenant]
     entered, release = threading.Event(), threading.Event()
     monkeypatch.setattr(routes, "_get_config", lambda **kw: SimpleNamespace(kubeconfig_path=None))
     monkeypatch.setattr(routes.cluster_targets, "resolve_and_cleanup_check", lambda *a: None)

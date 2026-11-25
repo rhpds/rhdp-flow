@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from api import jobs, routes
 from api.limiter import limiter as _test_limiter
 from api.server import app
+from api.workspace_store import ws
 from rhdp_flow import read_csv_input
 from tests.conftest import (
     BASIC_WORKSHOP_CSV,
@@ -36,19 +37,19 @@ from tests.conftest import (
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset module-level state between tests."""
-    routes._schedules = []
-    routes._deployment_results = []
-    routes._qa_results = []
+    ws.schedules = []
+    ws.deployment_results = []
+    ws.qa_results = []
     routes._qa_last_scope = None
-    routes._csv_filepath = None
-    routes._current_filename = ""
+    ws.csv_filepath = None
+    ws.current_filename = ""
     routes._sessions = []
     routes._session_counter = 0
-    routes._asset_passwords = None
+    ws.asset_passwords = None
     routes._cached_base_domain = None
-    routes._deploy_log_path = None
-    routes._qa_log_path = None
-    routes._destroy_check_results = []
+    ws.deploy_log_path = None
+    ws.qa_log_path = None
+    ws.destroy_check_results = []
     jobs._jobs.clear()
     jobs._jobs_truncated = 0
     # Reset rate limiter storage so per-route limits don't bleed across tests
@@ -56,7 +57,7 @@ def reset_state():
         _test_limiter.reset()
     yield
     # Drain any in-flight background jobs (e.g. QA runs) before the next test
-    # resets module globals — otherwise a late task write to routes._qa_results
+    # resets module globals — otherwise a late task write to ws.qa_results
     # bleeds across tests. A job writes results before its terminal status, so
     # "no running/pending jobs" guarantees all writes have landed.
     deadline = time.monotonic() + 5.0
@@ -106,7 +107,7 @@ def test_pod_probe_does_not_require_cluster_or_credentials(client, monkeypatch, 
     with patch.object(routes, "_get_config") as config, patch("subprocess.run") as run:
         response = client.get(path)
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
     config.assert_not_called()
     run.assert_not_called()
 
@@ -353,9 +354,9 @@ def test_clear_resets_passwords(client):
         "/api/schedules/upload-passwords",
         files={"file": ("passwords.csv", PASSWORDS_CSV.encode(), "text/csv")},
     )
-    assert routes._asset_passwords is not None
+    assert ws.asset_passwords is not None
     client.post("/api/sessions/clear", json={})
-    assert routes._asset_passwords is None
+    assert ws.asset_passwords is None
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +652,7 @@ def test_showroom_preflight_no_results(client):
 def test_showroom_preflight_pass(mock_preflight, uploaded_client):
     """Preflight with mocked deployment results and demolition."""
     from rhdp_flow import DeploymentResult
-    routes._deployment_results = [
+    ws.deployment_results = [
         DeploymentResult(
             ci_name="Test Workshop",
             ci="test.workshop.prod",
@@ -681,7 +682,7 @@ def test_showroom_preflight_pass(mock_preflight, uploaded_client):
 def test_showroom_preflight_fail(mock_preflight, uploaded_client):
     """Preflight reports failure correctly."""
     from rhdp_flow import DeploymentResult
-    routes._deployment_results = [
+    ws.deployment_results = [
         DeploymentResult(
             ci_name="Broken Workshop",
             ci="broken.lab.prod",
@@ -709,7 +710,7 @@ def test_showroom_preflight_fail(mock_preflight, uploaded_client):
 def test_showroom_preflight_with_filter_no_match(uploaded_client):
     """Preflight with a filter that matches nothing returns 400."""
     from rhdp_flow import DeploymentResult
-    routes._deployment_results = [
+    ws.deployment_results = [
         DeploymentResult(
             ci_name="A", ci="a.b.c", namespace="ns", guid="g",
             url="https://x", status="ok", provisioning_date="", auto_stop="",
@@ -723,7 +724,7 @@ def test_showroom_preflight_with_filter_no_match(uploaded_client):
 def test_deploy_results_expose_users_and_instances(client):
     """The results endpoint round-trips the seat/instance counts to the Deployments tab."""
     from rhdp_flow import DeploymentResult
-    routes._deployment_results = [
+    ws.deployment_results = [
         DeploymentResult(
             ci_name="Seats Lab", ci="seats.lab.prod", namespace="user-seats",
             guid="seats-1", url="https://x", status="verified",
@@ -738,13 +739,13 @@ def test_deploy_results_expose_users_and_instances(client):
         assert row["users"] == 40
         assert row["instances"] == 30
     finally:
-        routes._deployment_results = []
+        ws.deployment_results = []
 
 
 def test_delete_deploy_results_removes_matching_rows(client):
     """POST /deploy/results/delete removes rows by (ci, namespace); leaves others."""
     from rhdp_flow import DeploymentResult
-    routes._deployment_results = [
+    ws.deployment_results = [
         DeploymentResult(
             ci_name="A", ci="a.prod", namespace="ns-a", guid="g1", url="", status="failed",
             provisioning_date="", auto_stop="", auto_destroy="", timestamp="",
@@ -766,7 +767,7 @@ def test_delete_deploy_results_removes_matching_rows(client):
         remaining = client.get("/api/deploy/results").json()
         assert [r["ci"] for r in remaining] == ["b.prod"]
     finally:
-        routes._deployment_results = []
+        ws.deployment_results = []
 
 
 # ---------------------------------------------------------------------------
@@ -1556,7 +1557,7 @@ def test_validate_parameters_no_schedules(client):
 @patch("api.routes.get_catalog_item_parameter_schemas")
 def test_validate_parameters_enum_violation(mock_schemas, client):
     """The lb1161 case: AWS_Region=us-east-1 on an item whose enum is [us-east-2]."""
-    routes._schedules = [
+    ws.schedules = [
         make_schedule(
             ci="summit-2026.lb1161-sovereign-cloud-cnv.event",
             aws_regions="us-east-1",
@@ -1578,7 +1579,7 @@ def test_validate_parameters_enum_violation(mock_schemas, client):
 
 @patch("api.routes.get_catalog_item_parameter_schemas")
 def test_validate_parameters_valid_region(mock_schemas, client):
-    routes._schedules = [make_schedule(aws_regions="us-east-2")]
+    ws.schedules = [make_schedule(aws_regions="us-east-2")]
     mock_schemas.return_value = {"aws_region": {"enum": ["us-east-2"], "has_default": True}}
     resp = client.post("/api/schedules/validate-parameters")
     assert resp.status_code == 200
@@ -1590,7 +1591,7 @@ def test_validate_parameters_valid_region(mock_schemas, client):
 
 @patch("api.routes.get_catalog_item_parameter_schemas")
 def test_validate_parameters_cluster_unreachable(mock_schemas, client):
-    routes._schedules = [make_schedule(aws_regions="us-east-1")]
+    ws.schedules = [make_schedule(aws_regions="us-east-1")]
     mock_schemas.return_value = None
     resp = client.post("/api/schedules/validate-parameters")
     assert resp.status_code == 200
@@ -1754,8 +1755,8 @@ def test_deploy_status_includes_log_file(uploaded_client, log_dir):
     """Deploy dry-run sets _deploy_log_path, visible via session archive."""
     uploaded_client.post("/api/deploy/dry-run", json={})
     # The log path should be set on the module state
-    assert routes._deploy_log_path is not None
-    assert routes._deploy_log_path.endswith(".log")
+    assert ws.deploy_log_path is not None
+    assert ws.deploy_log_path.endswith(".log")
 
 
 # ---------------------------------------------------------------------------
