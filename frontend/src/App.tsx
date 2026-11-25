@@ -42,15 +42,16 @@ const ScheduleEditPage = lazy(() =>
   import('./components/ScheduleEditPage').then(m => ({ default: m.ScheduleEditPage })),
 );
 const DeploymentsTab = lazy(() => import('./components/DeploymentsTab').then(m => ({ default: m.DeploymentsTab })));
+const QATab = lazy(() => import('./components/QATab').then(m => ({ default: m.QATab })));
 const StudentsTab = lazy(() => import('./components/StudentsTab').then(m => ({ default: m.StudentsTab })));
 const DependencyReview = lazy(() => import('./components/DependencyReview').then(m => ({ default: m.DependencyReview })));
 
-const VALID_TABS = ['upload', 'deployments', 'students', 'dependencies'];
+const VALID_TABS = ['upload', 'deployments', 'qa', 'students', 'dependencies'];
 
 function getTabFromHash(): { tab: string; fromOps: boolean } {
   const hash = window.location.hash.replace('#', '');
-  // Legacy Operations/QA tab → Upload (QA now lives in Labagator)
-  if (hash === 'operations' || hash === 'qa') return { tab: 'upload', fromOps: false };
+  // Legacy Operations tab → Upload (day-2 actions live in Babylon Admin Ops / Labagator)
+  if (hash === 'operations') return { tab: 'upload', fromOps: false };
   return { tab: VALID_TABS.includes(hash) ? hash : 'upload', fromOps: false };
 }
 
@@ -186,6 +187,7 @@ const App: React.FC = () => {
     const tabNames: Record<string, string> = {
       upload: 'Upload & Deploy',
       deployments: 'Deployments',
+      qa: 'QA',
       students: 'Students',
     };
     const name = tabNames[String(activeTab)] || 'Upload & Deploy';
@@ -200,7 +202,7 @@ const App: React.FC = () => {
       setLocationHash(h);
       const key = h.replace(/^#/, '') || 'upload';
       if (key === 'edit') return;
-      if (key === 'operations' || key === 'qa') {
+      if (key === 'operations') {
         setActiveTab('upload');
         window.history.replaceState(null, '', '#upload');
         return;
@@ -358,6 +360,19 @@ const App: React.FC = () => {
               </Suspense>
             </Tab>
             <Tab
+              eventKey="qa"
+              title={<TabTitleText>QA{qaResults.length > 0 && <Badge className="tab-badge" isRead>{qaResults.length}</Badge>}</TabTitleText>}
+            >
+              <Suspense fallback={<Spinner />}>
+                <QATab
+                  qaResults={qaResults}
+                  setQAResults={setQAResults}
+                  showToast={showToast}
+                  schedules={schedules}
+                />
+              </Suspense>
+            </Tab>
+            <Tab
               eventKey="students"
               title={<TabTitleText>Students{studentsCount > 0 && <Badge className="tab-badge" isRead>{studentsCount}</Badge>}</TabTitleText>}
             >
@@ -388,7 +403,8 @@ const App: React.FC = () => {
               {[
                 ['1', 'Upload & Deploy tab'],
                 ['2', 'Deployments tab'],
-                ['3', 'Students tab'],
+                ['3', 'QA tab'],
+                ['4', 'Students tab'],
                 ['?', 'Toggle this help'],
               ].map(([key, desc]) => (
                 <tr key={key} style={{ borderBottom: '1px solid var(--pf-v6-global--BorderColor--100, #d2d2d2)' }}>
