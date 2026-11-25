@@ -168,25 +168,39 @@ class TestBuildResourceClaimPayload:
         assert ann.get("demo.redhat.com/requester") == "jdoe@redhat.com"
         assert ann.get("demo.redhat.com/orderedBy") == "jdoe@redhat.com"
 
-    def test_event_namespace_uses_operator_email_not_admin_example(self):
-        """Non-user namespaces must not fall back to admin@example.com."""
-        from rhdp_flow import RHDPConfig, resolve_requester_email
+    def test_event_namespace_uses_labagator_reporting_sa(self):
+        """event-* Workshops/RCs use labagator@ for reporting (not empty / admin@example)."""
+        from rhdp_flow import (
+            LABAGATOR_REPORTING_REQUESTER,
+            RHDPConfig,
+            resolve_requester_email,
+        )
 
-        assert resolve_requester_email("event-42-17112026") == ""
+        assert resolve_requester_email("event-42-17112026") == LABAGATOR_REPORTING_REQUESTER
+        # Explicit / operator still win when provided (back-compat).
         assert (
             resolve_requester_email(
                 "event-42-17112026",
                 operator_email="prutledg@redhat.com",
             )
-            == "prutledg@redhat.com"
+            == LABAGATOR_REPORTING_REQUESTER
+        )
+        assert (
+            resolve_requester_email(
+                "event-42-17112026",
+                requester_email="ops@redhat.com",
+            )
+            == "ops@redhat.com"
         )
         cfg = RHDPConfig()
         cfg.default_requester_email = "ops@redhat.com"
         schedule = make_schedule(namespace="event-42-17112026")
         payload = build_resource_claim_payload(schedule, cfg)
         ann = payload.get("metadata", {}).get("annotations", {})
-        assert ann.get("demo.redhat.com/requester") == "ops@redhat.com"
+        assert ann.get("demo.redhat.com/requester") == LABAGATOR_REPORTING_REQUESTER
+        assert ann.get("demo.redhat.com/orderedBy") == LABAGATOR_REPORTING_REQUESTER
         assert "admin@example.com" not in ann.values()
+        assert "" not in (ann.get("demo.redhat.com/requester"), ann.get("demo.redhat.com/orderedBy"))
 
 
 class TestGetCatalogItemNumUsersLimit:

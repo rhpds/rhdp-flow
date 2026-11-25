@@ -1693,6 +1693,12 @@ def write_deployment_results(
 # RESOURCECLAIM CREATION
 # ============================================================================
 
+# Reporting-api service account for event-* Workshop/RC requester stamps.
+# Empty string breaks create_workshop (fk_user_requester_email). Project
+# openshift.io/requester stays a real Ops email via _stamp_event_namespace.
+LABAGATOR_REPORTING_REQUESTER = "labagator@demo.redhat.com"
+
+
 def resolve_requester_email(
     namespace: str,
     requester_email: str = "",
@@ -1703,7 +1709,8 @@ def resolve_requester_email(
     Preference order:
       1. Explicit ``requester_email``
       2. Derived from ``user-<name>-<domain-parts>`` namespaces
-      3. Operator / default requester email (never ``admin@example.com``)
+      3. ``labagator@demo.redhat.com`` for ``event-*`` namespaces
+      4. Operator / default requester email (never ``admin@example.com``)
     """
     explicit = (requester_email or "").strip()
     if explicit:
@@ -1717,6 +1724,8 @@ def resolve_requester_email(
             domain = ".".join(parts[1:])
             if username and domain:
                 return f"{username}@{domain}"
+    if ns.startswith("event-"):
+        return LABAGATOR_REPORTING_REQUESTER
     operator = (operator_email or "").strip()
     if operator:
         return operator
@@ -3689,6 +3698,121 @@ def _multiworkshop_asset_names(mw_name: str, namespace: str, config: RHDPConfig)
         return set()
 
 
+def _ensure_multiworkshop_schedule_dates(
+    mw_name: str,
+    namespace: str,
+    start_iso: str,
+    end_iso: str,
+    config: RHDPConfig,
+) -> bool:
+    """Read back MultiWorkshop startDate/endDate and patch if they drift from schedule.
+
+    MultiWorkshop.spec.endDate must match CSV Auto-destroy (same source Workshop
+    lifespan.end uses). Catalog UI defaults to start+24h; without a verify/patch
+    step a wrong endDate can persist after create or on already-exists.
+    """
+    if config.dry_run or not mw_name or not start_iso or not end_iso:
+        return False
+    env = _oc_env(config)
+    try:
+        get_result = subprocess.run(
+            [
+                config.oc_command,
+                "get",
+                "multiworkshop",
+                mw_name,
+                "-n",
+                namespace,
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if get_result.returncode != 0 or not get_result.stdout.strip():
+            logger.warning(
+                f"Could not read MultiWorkshop {mw_name} for date verify: "
+                f"{(get_result.stderr or '').strip()}"
+            )
+            return False
+        spec = (json.loads(get_result.stdout) or {}).get("spec") or {}
+        actual_start = (spec.get("startDate") or "").strip()
+        actual_end = (spec.get("endDate") or "").strip()
+        if actual_start == start_iso and actual_end == end_iso:
+            logger.info(
+                f"MultiWorkshop {mw_name} dates match schedule "
+                f"(startDate={start_iso}, endDate={end_iso})"
+            )
+            return True
+
+        logger.warning(
+            f"MultiWorkshop {mw_name} date mismatch "
+            f"(startDate actual={actual_start!r} expected={start_iso!r}, "
+            f"endDate actual={actual_end!r} expected={end_iso!r}); patching"
+        )
+        patch = {"spec": {"startDate": start_iso, "endDate": end_iso}}
+        patch_result = subprocess.run(
+            [
+                config.oc_command,
+                "patch",
+                "multiworkshop",
+                mw_name,
+                "-n",
+                namespace,
+                "--type",
+                "merge",
+                "-p",
+                json.dumps(patch),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if patch_result.returncode != 0:
+            logger.warning(
+                f"Could not patch MultiWorkshop {mw_name} dates: "
+                f"{(patch_result.stderr or '').strip()}"
+            )
+            return False
+
+        # Confirm patch landed (workshop-manager copies endDate onto children).
+        verify = subprocess.run(
+            [
+                config.oc_command,
+                "get",
+                "multiworkshop",
+                mw_name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.spec.startDate} {.spec.endDate}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        got = (verify.stdout or "").strip()
+        expected = f"{start_iso} {end_iso}"
+        if verify.returncode == 0 and got == expected:
+            logger.info(
+                f"✅ Patched MultiWorkshop {mw_name} dates to "
+                f"startDate={start_iso} endDate={end_iso}"
+            )
+            return True
+        logger.warning(
+            f"MultiWorkshop {mw_name} still mismatched after patch "
+            f"(got={got!r}, expected={expected!r})"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"Error ensuring MultiWorkshop {mw_name} dates: {e}")
+        return False
+
+
 def _workshop_protected_by_multiworkshop(
     workshop_name: str,
     mw_name: str,
@@ -4133,7 +4257,20 @@ def create_multi_workshop(
                 if result.returncode == 0:
                     logger.info(f"✅ Successfully created MultiWorkshop: {multi_workshop_name}")
                 else:
-                    logger.info(f"MultiWorkshop {multi_workshop_name} already exists")
+                    logger.info(
+                        f"MultiWorkshop {multi_workshop_name} already exists; "
+                        f"ensuring startDate/endDate match schedule"
+                    )
+
+                # Always reconcile dates: create can land start+24h, and already-exists
+                # previously skipped updates so wrong endDate persisted.
+                _ensure_multiworkshop_schedule_dates(
+                    multi_workshop_name,
+                    schedule.namespace,
+                    start_iso,
+                    end_iso,
+                    config,
+                )
 
                 # Controller rewrites assets to owned Workshops; wait briefly then drop
                 # Flow shells that are no longer referenced (never touch adopted ones).
