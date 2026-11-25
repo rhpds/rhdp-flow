@@ -11,19 +11,23 @@ from lib.dependency_store import DependencyConflict, DependencyStore
 NOW = datetime(2026, 11, 18, tzinfo=UTC)
 
 
-@pytest.fixture
-def plan():
+def make_plan(base=NOW):
     nodes = []
     for role in ('parent', 'child'):
         nodes.append(dict(key=role, role=role, lab_id=len(nodes)+1,
                           ci_name=f'{role}.event', catalog_namespace='babylon-catalog-event',
-                          count=1, users=1, deploy_on=NOW.isoformat(),
-                          auto_destroy=(NOW+timedelta(days=1)).isoformat(),
+                          count=1, users=1, deploy_on=base.isoformat(),
+                          auto_destroy=(base+timedelta(days=1)).isoformat(),
                           workshop_name=f'test-{role}', parameters={}, bindings=[]))
     nodes[1]['bindings'] = [dict(resource_name='leaderboard', source_key='password',
                                 target_parameter='password', sensitive=True)]
     return DependencyPlan.model_validate(dict(run_id='run-1', event_id=1, cluster_id=1,
         namespace='test-ns', scope_key='session:1', revision=1, session_ids=[1], nodes=nodes))
+
+
+@pytest.fixture
+def plan():
+    return make_plan()
 
 
 @pytest.fixture

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import api.routes as routes_module
 from api.server import app
+from api.workspace_store import ws
 
 client = TestClient(app)
 
@@ -47,7 +47,7 @@ class TestValidateClusterTenantEndpoint:
             is_tenant=True,
             detected_cluster_ci="ocp4-cluster.prod",
         )
-        monkeypatch.setattr(routes_module, "_schedules", [tenant])
+        ws.schedules = [tenant]
         monkeypatch.setattr("rhdp_flow.find_provisioned_cluster_resourceclaim", lambda ci, cfg: False)
 
         response = client.post("/api/schedules/validate-cluster-tenant", headers=_auth_headers())
@@ -94,7 +94,7 @@ class TestValidateClusterTenantEndpoint:
             is_tenant=True,
             detected_cluster_ci="ocp4-cluster.prod",
         )
-        monkeypatch.setattr(routes_module, "_schedules", [cluster, tenant])
+        ws.schedules = [cluster, tenant]
 
         response = client.post("/api/schedules/validate-cluster-tenant", headers=_auth_headers())
 
@@ -139,7 +139,7 @@ class TestValidateClusterTenantEndpoint:
             is_tenant=True,
             detected_cluster_ci="ocp4-cluster.prod",
         )
-        monkeypatch.setattr(routes_module, "_schedules", [cluster, tenant])
+        ws.schedules = [cluster, tenant]
 
         response = client.post("/api/schedules/validate-cluster-tenant", headers=_auth_headers())
 
@@ -171,7 +171,7 @@ class TestValidateClusterTenantEndpoint:
             is_tenant=True,
             detected_cluster_ci="ocp4-cluster.prod",
         )
-        monkeypatch.setattr(routes_module, "_schedules", [tenant])
+        ws.schedules = [tenant]
         # Simulate lookup failure (no config or lookup returns None)
         monkeypatch.setattr("rhdp_flow.find_provisioned_cluster_resourceclaim", lambda ci, cfg: None)
 
@@ -199,7 +199,7 @@ class TestScheduleResponseIncludesDetectionFields:
             is_tenant=True, detected_cluster_ci="ocp4-cluster.prod",
             detection_method="naming", cluster_ci_source="naming",
         )
-        monkeypatch.setattr(routes_module, "_schedules", [tenant])
+        ws.schedules = [tenant]
 
         response = client.get("/api/schedules", headers=_auth_headers())
 

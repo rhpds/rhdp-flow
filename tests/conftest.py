@@ -16,11 +16,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # the keyless test suite exercises endpoints as before. Individual tests that
 # assert auth behavior set RHDP_API_KEY (or clear this) explicitly.
 os.environ.setdefault("RHDP_ALLOW_UNAUTHENTICATED", "true")
+# Keep test state off the developer's real Flow DB (default is ~/.rhdp-flow/flow.db).
+os.environ.setdefault("RHDP_DATABASE_URL", f"sqlite:///{tempfile.gettempdir()}/rhdp-flow-pytest.db")
 
 from rhdp_flow import (
     RHDPConfig,
     WorkshopSchedule,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_workspace_db():
+    """Reset workspace state (schedules, results, archives) before every test.
+
+    Flow state lives in the DB via ``api.workspace_store``, not in module
+    globals, so a clean DB is what gives each test an empty workspace.
+    """
+    from api.db import reset_db_for_tests
+
+    reset_db_for_tests()
+    yield
 
 
 @pytest.fixture(autouse=True)
